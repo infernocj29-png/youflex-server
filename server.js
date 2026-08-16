@@ -1,8 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const path = require('path');
-const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '33ef7aaa3002731060f718f25dd995ac';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyCxCmXs4P4P8SenCmTlj5eawG4ccNP2FEg';
 
-console.log('🚀 YOUFLEX Server Starting...');
+console.log('🚀 YOUFLEX Backend Server Starting...');
 console.log('📡 TMDB API:', TMDB_API_KEY ? '✅ Configured' : '❌ Missing');
 console.log('🎬 YouTube API:', YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YOUTUBE_API_KEY_HERE' ? '✅ Configured' : '❌ Not configured');
 
@@ -19,9 +17,7 @@ console.log('🎬 YouTube API:', YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YO
 app.use(cors());
 app.use(express.json());
 
-// ============ API ROUTES ============
-
-// Root route - API info
+// ============ ROOT ROUTE ============
 app.get('/', (req, res) => {
     res.json({
         name: 'YOUFLEX API',
@@ -354,25 +350,10 @@ app.get('/api/similar/:type/:id', async (req, res) => {
     }
 });
 
-// ============ SERVE STATIC FILES (for frontend if needed) ============
-// Check if index.html exists in the current directory
-const indexPath = path.join(__dirname, 'index.html');
-if (fs.existsSync(indexPath)) {
-    console.log('📄 Serving index.html for frontend');
-    app.use(express.static(__dirname));
-    app.get('*', (req, res) => {
-        res.sendFile(indexPath);
-    });
-} else {
-    console.log('ℹ️ No index.html found - API-only mode');
-}
-
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 YOUFLEX Server running on port ${PORT}`);
+    console.log(`\n🚀 YOUFLEX Backend Server running on port ${PORT}`);
     console.log(`📍 URL: http://localhost:${PORT}`);
     console.log(`📡 TMDB API: ${TMDB_API_KEY ? '✅ Configured' : '❌ Missing'}`);
     console.log(`🎬 YouTube API: ${YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YOUTUBE_API_KEY_HERE' ? '✅ Configured' : '❌ Not configured'}`);
-    console.log(`📁 Directory: ${__dirname}`);
-    console.log(`📄 index.html exists: ${fs.existsSync(indexPath) ? 'Yes' : 'No'}`);
 });
