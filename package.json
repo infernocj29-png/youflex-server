@@ -1,7 +1,7 @@
 {
   "name": "youflex-backend",
   "version": "1.0.0",
-  "description": "YOUFLEX Backend API",
+  "description": "YOUFLEX Backend API Server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
