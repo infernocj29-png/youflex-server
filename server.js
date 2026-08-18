@@ -14,7 +14,11 @@ console.log('📡 TMDB API:', TMDB_API_KEY ? '✅ Configured' : '❌ Missing');
 console.log('🎬 YouTube API:', YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YOUTUBE_API_KEY_HERE' ? '✅ Configured' : '❌ Not configured');
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 // Root route
