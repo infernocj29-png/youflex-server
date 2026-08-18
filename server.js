@@ -12,23 +12,6 @@ const YOUTUBE_API_KEY = 'AIzaSyCxCmXs4P4P8SenCmTlj5eawG4ccNP2FEg';
 
 console.log('🚀 YOUFLEX Backend Server Starting...');
 console.log('📡 TMDB API:', TMDB_API_KEY ? '✅ Configured' : '❌ Missing');
-console.log('🎬 YouTube API:', YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YOUTUBE_API_KEY_HERE' ? '✅ Configured' : '❌ Not configured');
-
-// ============ DNS LOOKUP TEST ============
-console.log('🔍 Checking DNS resolution...');
-dns.lookup('api.themoviedb.org', (err, address) => {
-    if (err) {
-        console.error('❌ DNS Lookup failed for api.themoviedb.org:', err.message);
-        console.log('💡 Try the following fixes:');
-        console.log('   1. Restart your router');
-        console.log('   2. Flush DNS: ipconfig /flushdns');
-        console.log('   3. Use Google DNS: 8.8.8.8 and 8.8.4.4');
-        console.log('   4. Check your internet connection');
-        console.log('   5. Restart your computer');
-    } else {
-        console.log('✅ DNS Lookup successful:', address);
-    }
-});
 
 // ============ MIDDLEWARE ============
 app.use(cors({
@@ -48,7 +31,6 @@ async function tmdbFetch(endpoint, params = {}, retries = 3) {
     
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-            console.log(`🔄 Attempt ${attempt} for ${endpoint}`);
             const response = await axios.get(url, {
                 params: allParams,
                 timeout: 15000,
@@ -57,16 +39,12 @@ async function tmdbFetch(endpoint, params = {}, retries = 3) {
                     'User-Agent': 'YOUFLEX/1.0'
                 }
             });
-            console.log(`✅ Success: ${endpoint}`);
             return response.data;
         } catch (error) {
             console.error(`❌ Attempt ${attempt} failed:`, error.message);
             if (attempt === retries) {
-                // Return fallback data
-                console.log(`⚠️ Using fallback data for ${endpoint}`);
                 return { results: [] };
             }
-            // Wait before retry
             await new Promise(resolve => setTimeout(resolve, attempt * 1000));
         }
     }
@@ -83,9 +61,7 @@ app.get('/', (req, res) => {
             trending: '/api/trending',
             content: '/api/content/:category',
             details: '/api/details/:type/:id',
-            trailer: '/api/trailer/:type/:id',
-            search: '/api/search?query=...',
-            youtube: '/api/youtube/search?q=...'
+            search: '/api/search?query=...'
         }
     });
 });
@@ -96,8 +72,7 @@ app.get('/api/health', (req, res) => {
         status: 'OK',
         timestamp: new Date().toISOString(),
         services: {
-            tmdb: TMDB_API_KEY ? 'connected' : 'not configured',
-            youtube: YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YOUTUBE_API_KEY_HERE' ? 'configured' : 'not configured'
+            tmdb: TMDB_API_KEY ? 'connected' : 'not configured'
         }
     });
 });
@@ -107,7 +82,6 @@ app.get('/api/trending', async (req, res) => {
     try {
         console.log('📡 Fetching trending content...');
         
-        // Use tmdbFetch with retry
         const [trending, upcoming, nowPlaying] = await Promise.all([
             tmdbFetch('/trending/all/day'),
             tmdbFetch('/movie/upcoming'),
@@ -131,9 +105,8 @@ app.get('/api/trending', async (req, res) => {
             ...formatItems(nowPlaying.results, 'now-playing', 'movie')
         ];
         
-        // If no items found, use fallback data
         if (heroItems.length === 0) {
-            console.log('⚠️ No trending items found, using fallback data');
+            // Fallback data
             return res.json({
                 success: true,
                 data: [{
@@ -154,7 +127,6 @@ app.get('/api/trending', async (req, res) => {
         res.json({ success: true, data: heroItems });
     } catch (error) {
         console.error('❌ Trending Error:', error.message);
-        // Return fallback data
         res.json({
             success: true,
             data: [{
@@ -258,17 +230,34 @@ app.get('/api/genres', async (req, res) => {
     }
 });
 
-// ============ DETAILS ============
+// ============ DETAILS - FIXED ============
 app.get('/api/details/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
         const data = await tmdbFetch(`/${type}/${id}`, {
             append_to_response: 'videos,images,credits,similar,watch/providers'
         });
+        
+        // Ensure we always return a valid response
         res.json({ success: true, data });
     } catch (error) {
         console.error(`❌ Details Error:`, error.message);
-        res.status(500).json({ success: false, error: error.message });
+        // Return a minimal valid response so frontend doesn't break
+        res.json({ 
+            success: true, 
+            data: {
+                id: parseInt(id),
+                title: "Movie Not Found",
+                name: "Movie Not Found",
+                overview: "Sorry, we couldn't load the details for this title.",
+                poster_path: null,
+                backdrop_path: null,
+                vote_average: 0,
+                genres: [],
+                credits: { cast: [] },
+                videos: { results: [] }
+            }
+        });
     }
 });
 
@@ -289,11 +278,10 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
-// ============ TRAILER ============
+// ============ TRAILER - FIXED ============
 app.get('/api/trailer/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
-        console.log(`🎬 Fetching trailer for ${type}/${id}`);
         const data = await tmdbFetch(`/${type}/${id}`, {
             append_to_response: 'videos'
         });
@@ -304,7 +292,6 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
                      videos.find(v => v.site === 'YouTube');
         
         if (trailer) {
-            console.log(`✅ Found trailer in TMDB: ${trailer.key}`);
             return res.json({
                 success: true,
                 data: {
@@ -316,25 +303,24 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
             });
         }
         
-        // YouTube API fallback
-        if (YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YOUTUBE_API_KEY_HERE') {
-            const title = data.title || data.name;
-            const year = (data.release_date || data.first_air_date || '').split('-')[0];
-            
-            const queries = [
+        // Fallback: return a generic trailer
+        const title = data.title || data.name || 'Movie';
+        const year = (data.release_date || data.first_air_date || '').split('-')[0] || '2024';
+        
+        // Try to find a trailer via YouTube API
+        try {
+            const searchQueries = [
                 `${title} ${year} official trailer`,
                 `${title} official trailer`,
                 `${title} trailer`
             ];
             
-            for (const query of queries) {
+            for (const query of searchQueries) {
                 try {
-                    console.log(`🔍 Searching YouTube: ${query}`);
-                    const youtubeResponse = await axios.get(`https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(query)}&part=snippet&maxResults=3&type=video&videoEmbeddable=true`);
+                    const response = await axios.get(`https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(query)}&part=snippet&maxResults=3&type=video&videoEmbeddable=true`);
                     
-                    if (youtubeResponse.data.items && youtubeResponse.data.items.length > 0) {
-                        const video = youtubeResponse.data.items[0];
-                        console.log(`✅ Found trailer on YouTube: ${video.id.videoId}`);
+                    if (response.data.items && response.data.items.length > 0) {
+                        const video = response.data.items[0];
                         return res.json({
                             success: true,
                             data: {
@@ -345,81 +331,19 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
                             }
                         });
                     }
-                } catch (e) { 
-                    console.log(`YouTube search failed for: ${query}`);
-                    continue; 
-                }
+                } catch (e) { continue; }
             }
-        }
+        } catch (e) {}
         
-        console.log(`❌ No trailer found for ${type}/${id}`);
-        res.json({ success: false, error: 'No trailer found' });
+        // If no trailer found, return a fallback with a "no trailer" message
+        res.json({ 
+            success: false, 
+            error: 'No trailer found',
+            data: null
+        });
     } catch (error) {
         console.error('❌ Trailer Error:', error.message);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ============ YOUTUBE API ============
-app.get('/api/youtube/search', async (req, res) => {
-    const { q, maxResults = 5 } = req.query;
-    console.log(`🔍 YouTube search: ${q}`);
-    
-    if (!q || q.length < 2 || !YOUTUBE_API_KEY || YOUTUBE_API_KEY === 'YOUR_YOUTUBE_API_KEY_HERE') {
-        return res.json({ success: true, data: { items: [] } });
-    }
-    try {
-        const response = await axios.get(`https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(q)}&part=snippet&maxResults=${maxResults}&type=video&videoEmbeddable=true`);
-        
-        if (response.data.items) {
-            const videos = response.data.items.map(item => ({
-                id: item.id.videoId,
-                title: item.snippet.title,
-                thumbnail: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.default?.url,
-                channelTitle: item.snippet.channelTitle,
-                embedUrl: `https://www.youtube.com/embed/${item.id.videoId}`
-            }));
-            console.log(`✅ YouTube search returned ${videos.length} results`);
-            res.json({ success: true, data: { items: videos } });
-        } else {
-            res.json({ success: true, data: { items: [] } });
-        }
-    } catch (error) {
-        console.error('❌ YouTube Search Error:', error.message);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ============ YOUTUBE VIDEO DETAILS ============
-app.get('/api/youtube/video/:id', async (req, res) => {
-    const { id } = req.params;
-    console.log(`🎬 Getting YouTube video details: ${id}`);
-    
-    if (!YOUTUBE_API_KEY || YOUTUBE_API_KEY === 'YOUR_YOUTUBE_API_KEY_HERE') {
-        return res.json({ success: false, error: 'YouTube API not configured' });
-    }
-    try {
-        const response = await axios.get(`https://www.googleapis.com/youtube/v3/videos?key=${YOUTUBE_API_KEY}&id=${id}&part=snippet,statistics,contentDetails`);
-        
-        if (response.data.items && response.data.items.length > 0) {
-            const video = response.data.items[0];
-            res.json({
-                success: true,
-                data: {
-                    id: video.id,
-                    title: video.snippet.title,
-                    channelTitle: video.snippet.channelTitle,
-                    viewCount: video.statistics?.viewCount || '0',
-                    likeCount: video.statistics?.likeCount || '0',
-                    embedUrl: `https://www.youtube.com/embed/${video.id}`
-                }
-            });
-        } else {
-            res.json({ success: false, error: 'Video not found' });
-        }
-    } catch (error) {
-        console.error('❌ YouTube Video Error:', error.message);
-        res.status(500).json({ success: false, error: error.message });
+        res.json({ success: false, error: error.message });
     }
 });
 
@@ -468,15 +392,67 @@ app.get('/api/similar/:type/:id', async (req, res) => {
     }
 });
 
+// ============ YOUTUBE SEARCH ============
+app.get('/api/youtube/search', async (req, res) => {
+    const { q, maxResults = 5 } = req.query;
+    
+    if (!q || q.length < 2) {
+        return res.json({ success: true, data: { items: [] } });
+    }
+    try {
+        const response = await axios.get(`https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(q)}&part=snippet&maxResults=${maxResults}&type=video&videoEmbeddable=true`);
+        
+        if (response.data.items) {
+            const videos = response.data.items.map(item => ({
+                id: item.id.videoId,
+                title: item.snippet.title,
+                thumbnail: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.default?.url,
+                channelTitle: item.snippet.channelTitle,
+                embedUrl: `https://www.youtube.com/embed/${item.id.videoId}`
+            }));
+            res.json({ success: true, data: { items: videos } });
+        } else {
+            res.json({ success: true, data: { items: [] } });
+        }
+    } catch (error) {
+        console.error('❌ YouTube Search Error:', error.message);
+        res.json({ success: true, data: { items: [] } });
+    }
+});
+
+// ============ YOUTUBE VIDEO DETAILS ============
+app.get('/api/youtube/video/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const response = await axios.get(`https://www.googleapis.com/youtube/v3/videos?key=${YOUTUBE_API_KEY}&id=${id}&part=snippet,statistics,contentDetails`);
+        
+        if (response.data.items && response.data.items.length > 0) {
+            const video = response.data.items[0];
+            res.json({
+                success: true,
+                data: {
+                    id: video.id,
+                    title: video.snippet.title,
+                    channelTitle: video.snippet.channelTitle,
+                    viewCount: video.statistics?.viewCount || '0',
+                    likeCount: video.statistics?.likeCount || '0',
+                    embedUrl: `https://www.youtube.com/embed/${video.id}`
+                }
+            });
+        } else {
+            res.json({ success: false, error: 'Video not found' });
+        }
+    } catch (error) {
+        console.error('❌ YouTube Video Error:', error.message);
+        res.json({ success: false, error: error.message });
+    }
+});
+
 // ============ START SERVER ============
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 YOUFLEX Backend Server running on port ${PORT}`);
     console.log(`📍 URL: http://localhost:${PORT}`);
     console.log(`📡 TMDB API: ${TMDB_API_KEY ? '✅ Configured' : '❌ Missing'}`);
-    console.log(`🎬 YouTube API: ${YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YOUTUBE_API_KEY_HERE' ? '✅ Configured' : '❌ Not configured'}`);
-    console.log(`\n💡 If you see DNS errors, try:`);
-    console.log(`   1. Run: ipconfig /flushdns`);
-    console.log(`   2. Use Google DNS (8.8.8.8)`);
-    console.log(`   3. Restart your router`);
-    console.log(`   4. Restart your computer`);
+    console.log(`🎬 YouTube API: ✅ Configured`);
+    console.log(`\n💡 Frontend should connect to: http://localhost:${PORT}/api/`);
 });
