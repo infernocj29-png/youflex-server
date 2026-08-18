@@ -17,7 +17,7 @@ console.log('🎬 YouTube API:', YOUTUBE_API_KEY && YOUTUBE_API_KEY !== 'YOUR_YO
 app.use(cors());
 app.use(express.json());
 
-// ============ ROOT ROUTE ============
+// Root route
 app.get('/', (req, res) => {
     res.json({
         name: 'YOUFLEX API',
@@ -35,7 +35,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// ============ HEALTH CHECK ============
+// Health check
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'OK',
@@ -47,7 +47,7 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// ============ TRENDING ============
+// Trending
 app.get('/api/trending', async (req, res) => {
     try {
         console.log('📡 Fetching trending content...');
@@ -81,7 +81,7 @@ app.get('/api/trending', async (req, res) => {
     }
 });
 
-// ============ CONTENT BY CATEGORY ============
+// Content by category
 app.get('/api/content/:category', async (req, res) => {
     const { category } = req.params;
     const { page = 1, sort = 'popularity.desc', rating = 0, year = '', type = 'movie' } = req.query;
@@ -137,7 +137,7 @@ app.get('/api/content/:category', async (req, res) => {
     }
 });
 
-// ============ GENRES ============
+// Genres
 app.get('/api/genres/all', async (req, res) => {
     try {
         const [movieGenres, tvGenres] = await Promise.all([
@@ -166,7 +166,7 @@ app.get('/api/genres', async (req, res) => {
     }
 });
 
-// ============ DETAILS ============
+// Details
 app.get('/api/details/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
@@ -178,7 +178,7 @@ app.get('/api/details/:type/:id', async (req, res) => {
     }
 });
 
-// ============ SEARCH ============
+// Search
 app.get('/api/search', async (req, res) => {
     const { query, page = 1 } = req.query;
     if (!query || query.length < 2) {
@@ -192,7 +192,7 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
-// ============ TRAILER ============
+// Trailer
 app.get('/api/trailer/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
@@ -251,7 +251,7 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
     }
 });
 
-// ============ YOUTUBE API ============
+// YouTube Search
 app.get('/api/youtube/search', async (req, res) => {
     const { q, maxResults = 5 } = req.query;
     if (!q || q.length < 2 || !YOUTUBE_API_KEY || YOUTUBE_API_KEY === 'YOUR_YOUTUBE_API_KEY_HERE') {
@@ -278,6 +278,7 @@ app.get('/api/youtube/search', async (req, res) => {
     }
 });
 
+// YouTube Video Details
 app.get('/api/youtube/video/:id', async (req, res) => {
     const { id } = req.params;
     if (!YOUTUBE_API_KEY || YOUTUBE_API_KEY === 'YOUR_YOUTUBE_API_KEY_HERE') {
@@ -308,7 +309,7 @@ app.get('/api/youtube/video/:id', async (req, res) => {
     }
 });
 
-// ============ CREDITS, EPISODES, PROVIDERS, SIMILAR ============
+// Credits
 app.get('/api/credits/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
@@ -319,6 +320,7 @@ app.get('/api/credits/:type/:id', async (req, res) => {
     }
 });
 
+// Episodes
 app.get('/api/episodes/:tvId/:season', async (req, res) => {
     const { tvId, season } = req.params;
     try {
@@ -329,6 +331,7 @@ app.get('/api/episodes/:tvId/:season', async (req, res) => {
     }
 });
 
+// Providers
 app.get('/api/providers/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
@@ -339,6 +342,7 @@ app.get('/api/providers/:type/:id', async (req, res) => {
     }
 });
 
+// Similar
 app.get('/api/similar/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     const { page = 1 } = req.query;
