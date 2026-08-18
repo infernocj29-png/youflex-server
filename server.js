@@ -6,8 +6,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // API Keys
-const TMDB_API_KEY = process.env.TMDB_API_KEY || '33ef7aaa3002731060f718f25dd995ac';
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyCxCmXs4P4P8SenCmTlj5eawG4ccNP2FEg';
+const TMDB_API_KEY = '33ef7aaa3002731060f718f25dd995ac';
+const YOUTUBE_API_KEY = 'AIzaSyCxCmXs4P4P8SenCmTlj5eawG4ccNP2FEg';
 
 console.log('🚀 YOUFLEX Backend Server Starting...');
 console.log('📡 TMDB API:', TMDB_API_KEY ? '✅ Configured' : '❌ Missing');
@@ -192,17 +192,21 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
-// Trailer
+// ===== FIXED TRAILER ENDPOINT =====
 app.get('/api/trailer/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
+        console.log(`🎬 Fetching trailer for ${type}/${id}`);
         const response = await axios.get(`https://api.themoviedb.org/3/${type}/${id}?api_key=${TMDB_API_KEY}&append_to_response=videos`);
         const videos = response.data.videos?.results || [];
-        const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') ||
-                       videos.find(v => v.site === 'YouTube' && v.type === 'Teaser') ||
-                       videos.find(v => v.site === 'YouTube');
+        
+        // Find trailer
+        let trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') ||
+                     videos.find(v => v.site === 'YouTube' && v.type === 'Teaser') ||
+                     videos.find(v => v.site === 'YouTube');
         
         if (trailer) {
+            console.log(`✅ Found trailer in TMDB: ${trailer.key}`);
             return res.json({
                 success: true,
                 data: {
@@ -227,9 +231,12 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
             
             for (const query of queries) {
                 try {
-                    const youtubeResponse = await axios.get(`https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(query)}&part=snippet&maxResults=3&type=video`);
+                    console.log(`🔍 Searching YouTube: ${query}`);
+                    const youtubeResponse = await axios.get(`https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(query)}&part=snippet&maxResults=3&type=video&videoEmbeddable=true`);
+                    
                     if (youtubeResponse.data.items && youtubeResponse.data.items.length > 0) {
                         const video = youtubeResponse.data.items[0];
+                        console.log(`✅ Found trailer on YouTube: ${video.id.videoId}`);
                         return res.json({
                             success: true,
                             data: {
@@ -240,10 +247,14 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
                             }
                         });
                     }
-                } catch (e) { continue; }
+                } catch (e) { 
+                    console.log(`YouTube search failed for: ${query}`);
+                    continue; 
+                }
             }
         }
         
+        console.log(`❌ No trailer found for ${type}/${id}`);
         res.json({ success: false, error: 'No trailer found' });
     } catch (error) {
         console.error('❌ Trailer Error:', error.message);
@@ -254,6 +265,8 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
 // YouTube Search
 app.get('/api/youtube/search', async (req, res) => {
     const { q, maxResults = 5 } = req.query;
+    console.log(`🔍 YouTube search: ${q}`);
+    
     if (!q || q.length < 2 || !YOUTUBE_API_KEY || YOUTUBE_API_KEY === 'YOUR_YOUTUBE_API_KEY_HERE') {
         return res.json({ success: true, data: { items: [] } });
     }
@@ -268,6 +281,7 @@ app.get('/api/youtube/search', async (req, res) => {
                 channelTitle: item.snippet.channelTitle,
                 embedUrl: `https://www.youtube.com/embed/${item.id.videoId}`
             }));
+            console.log(`✅ YouTube search returned ${videos.length} results`);
             res.json({ success: true, data: { items: videos } });
         } else {
             res.json({ success: true, data: { items: [] } });
@@ -281,6 +295,8 @@ app.get('/api/youtube/search', async (req, res) => {
 // YouTube Video Details
 app.get('/api/youtube/video/:id', async (req, res) => {
     const { id } = req.params;
+    console.log(`🎬 Getting YouTube video details: ${id}`);
+    
     if (!YOUTUBE_API_KEY || YOUTUBE_API_KEY === 'YOUR_YOUTUBE_API_KEY_HERE') {
         return res.json({ success: false, error: 'YouTube API not configured' });
     }
