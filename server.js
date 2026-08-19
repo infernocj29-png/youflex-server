@@ -1,48 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const dns = require('dns');
-
-// ============ DNS FIX ============
-console.log('🌐 Setting up DNS fallback...');
-
-// Override DNS to use Google DNS
-const originalLookup = dns.lookup;
-dns.lookup = function(hostname, options, callback) {
-    if (typeof options === 'function') {
-        callback = options;
-        options = {};
-    }
-    // Try to resolve with original first, fallback to Google DNS
-    originalLookup(hostname, options, (err, address, family) => {
-        if (err) {
-            // If DNS fails, use Google's DNS server directly
-            const dns2 = require('dns');
-            dns2.resolve(hostname, (err2, addresses) => {
-                if (err2) {
-                    console.log(`⚠️ DNS fallback failed for ${hostname}`);
-                    return callback(err, null, null);
-                }
-                if (addresses && addresses.length > 0) {
-                    console.log(`✅ DNS fallback resolved ${hostname} -> ${addresses[0]}`);
-                    return callback(null, addresses[0], 4);
-                }
-                callback(err, null, null);
-            });
-        } else {
-            callback(err, address, family);
-        }
-    });
-};
-
-console.log('🌐 DNS override active');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// API Keys
-const TMDB_API_KEY = '33ef7aaa3002731060f718f25dd995ac';
-const YOUTUBE_API_KEY = 'AIzaSyCxCmXs4P4P8SenCmTlj5eawG4ccNP2FEg';
+// ============ API KEYS ============
+// Set these as environment variables in production (Render, etc).
+// Falling back to empty string so the server still boots without them,
+// but TMDB/YouTube calls will fail until they're configured.
+const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 
 console.log('🚀 YOUFLEX Backend Server Starting...');
 
@@ -54,63 +22,59 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ============ TMDB API WITH DNS RETRY ============
-async function tmdbFetch(endpoint, params = {}, retries = 3) {
+// ============ TMDB API HELPER ============
+async function tmdbFetch(endpoint, params = {}, retries = 2) {
     const url = `https://api.themoviedb.org/3${endpoint}`;
-    const allParams = {
-        api_key: TMDB_API_KEY,
-        ...params
-    };
-    
+    const allParams = { api_key: TMDB_API_KEY, ...params };
+
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-            console.log(`📡 Attempt ${attempt} for ${endpoint}`);
             const response = await axios.get(url, {
                 params: allParams,
-                timeout: 20000,
-                headers: {
-                    'Accept': 'application/json',
-                    'User-Agent': 'YOUFLEX/1.0'
-                }
+                timeout: 15000,
+                headers: { 'Accept': 'application/json', 'User-Agent': 'YOUFLEX/1.0' }
             });
             return response.data;
         } catch (error) {
-            console.error(`❌ Attempt ${attempt} failed:`, error.code || error.message);
-            if (error.code === 'ENOTFOUND') {
-                // Try to resolve DNS again
-                try {
-                    await new Promise((resolve, reject) => {
-                        dns.lookup('api.themoviedb.org', (err) => {
-                            if (err) reject(err);
-                            else resolve();
-                        });
-                    });
-                    console.log('✅ DNS resolved successfully');
-                } catch (dnsError) {
-                    console.log('⚠️ DNS still failing, waiting...');
-                }
-            }
-            if (attempt === retries) {
-                console.log(`❌ All ${retries} attempts failed for ${endpoint}`);
-                return { results: [] };
-            }
-            await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+            console.error(`❌ TMDB attempt ${attempt} failed for ${endpoint}:`, error.message);
+            if (attempt === retries) return { results: [] };
+            await new Promise(resolve => setTimeout(resolve, attempt * 1000));
         }
     }
 }
 
-// ============ ROOT ROUTE ============
+// ============ YOUTUBE API HELPER ============
+async function youtubeFetch(endpoint, params = {}) {
+    const url = `https://www.googleapis.com/youtube/v3${endpoint}`;
+    const response = await axios.get(url, {
+        params: { key: YOUTUBE_API_KEY, ...params },
+        timeout: 15000
+    });
+    return response.data;
+}
+
+// ============ ROOT ============
 app.get('/', (req, res) => {
     res.json({
         name: 'YOUFLEX API',
-        version: '1.0.0',
+        version: '1.1.0',
         status: 'running',
         endpoints: {
             health: '/api/health',
             trending: '/api/trending',
             content: '/api/content/:category',
+            genre: '/api/genre/:id',
             details: '/api/details/:type/:id',
-            search: '/api/search?query=...'
+            credits: '/api/credits/:type/:id',
+            similar: '/api/similar/:type/:id',
+            providers: '/api/providers/:type/:id',
+            episodes: '/api/episodes/:tvId/:season',
+            search: '/api/search?query=...',
+            trailer: '/api/trailer/:type/:id',
+            youtubeSearch: '/api/youtube/search?q=...',
+            youtubeVideo: '/api/youtube/video/:id',
+            embedMovie: '/api/embed/movie/:imdbId',
+            embedEpisode: '/api/embed/tv/:imdbId/:season/:episode'
         }
     });
 });
@@ -121,75 +85,108 @@ app.get('/api/health', (req, res) => {
         status: 'OK',
         timestamp: new Date().toISOString(),
         services: {
-            tmdb: TMDB_API_KEY ? 'connected' : 'not configured'
+            tmdb: TMDB_API_KEY ? 'configured' : 'not configured',
+            youtube: YOUTUBE_API_KEY ? 'configured' : 'not configured'
         }
     });
 });
 
-// ============ TRENDING ============
+// ============ EMBED MOVIE ============
+app.get('/api/embed/movie/:imdbId', (req, res) => {
+    const { imdbId } = req.params;
+    
+    // Validate IMDb ID format (starts with 'tt' followed by numbers)
+    if (!imdbId || !/^tt\d+$/.test(imdbId)) {
+        return res.status(400).json({
+            success: false,
+            error: 'Invalid IMDb ID format. Must start with "tt" followed by numbers.'
+        });
+    }
+
+    const embedHtml = `
+        <iframe src="https://vidsrc.hair/embed/movie/${imdbId}"
+                width="100%" height="100%" frameborder="0"
+                allowfullscreen></iframe>
+    `;
+
+    res.json({
+        success: true,
+        data: {
+            imdbId: imdbId,
+            embedUrl: `https://vidsrc.hair/embed/movie/${imdbId}`,
+            html: embedHtml,
+            type: 'movie'
+        }
+    });
+});
+
+// ============ EMBED TV EPISODE ============
+app.get('/api/embed/tv/:imdbId/:season/:episode', (req, res) => {
+    const { imdbId, season, episode } = req.params;
+    
+    // Validate IMDb ID format
+    if (!imdbId || !/^tt\d+$/.test(imdbId)) {
+        return res.status(400).json({
+            success: false,
+            error: 'Invalid IMDb ID format. Must start with "tt" followed by numbers.'
+        });
+    }
+
+    // Validate season and episode are numbers
+    const seasonNum = parseInt(season);
+    const episodeNum = parseInt(episode);
+    
+    if (isNaN(seasonNum) || isNaN(episodeNum) || seasonNum < 1 || episodeNum < 1) {
+        return res.status(400).json({
+            success: false,
+            error: 'Season and episode must be positive integers.'
+        });
+    }
+
+    const embedHtml = `
+        <!-- ${imdbId}, season ${seasonNum}, episode ${episodeNum} -->
+        <iframe src="https://vidsrc.hair/embed/tv/${imdbId}/${seasonNum}/${episodeNum}"
+                width="100%" height="100%" frameborder="0"
+                allowfullscreen></iframe>
+    `;
+
+    res.json({
+        success: true,
+        data: {
+            imdbId: imdbId,
+            season: seasonNum,
+            episode: episodeNum,
+            embedUrl: `https://vidsrc.hair/embed/tv/${imdbId}/${seasonNum}/${episodeNum}`,
+            html: embedHtml,
+            type: 'tv'
+        }
+    });
+});
+
+// ============ TRENDING (hero banner) ============
 app.get('/api/trending', async (req, res) => {
     try {
-        console.log('📡 Fetching trending content...');
-        
         const [trending, upcoming, nowPlaying] = await Promise.all([
             tmdbFetch('/trending/all/day'),
             tmdbFetch('/movie/upcoming'),
             tmdbFetch('/movie/now_playing')
         ]);
-        
-        const formatItems = (items, category, mediaType) => {
-            return (items || [])
-                .filter(item => item.backdrop_path && item.media_type !== 'person')
-                .slice(0, 4)
-                .map(item => ({
-                    ...item,
-                    media_type: mediaType || item.media_type || 'movie',
-                    heroCategory: category
-                }));
-        };
-        
+
+        const formatItems = (items, category, mediaType) => (items || [])
+            .filter(item => item.backdrop_path && item.media_type !== 'person')
+            .slice(0, 4)
+            .map(item => ({ ...item, media_type: mediaType || item.media_type || 'movie', heroCategory: category }));
+
         const heroItems = [
             ...formatItems(trending.results, 'trending'),
             ...formatItems(upcoming.results, 'upcoming', 'movie'),
             ...formatItems(nowPlaying.results, 'now-playing', 'movie')
         ];
-        
-        if (heroItems.length === 0) {
-            return res.json({
-                success: true,
-                data: [{
-                    id: 550,
-                    title: "Fight Club",
-                    name: "Fight Club",
-                    media_type: "movie",
-                    heroCategory: "trending",
-                    backdrop_path: "/bptfVGEQuv6vDTIMVCHjJ9Dz8PX.jpg",
-                    poster_path: "/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg",
-                    vote_average: 8.8,
-                    overview: "A ticking-time-bomb insomniac and a slippery soap salesman channel primal male aggression into a shocking new form of therapy.",
-                    release_date: "1999-10-15"
-                }]
-            });
-        }
-        
+
         res.json({ success: true, data: heroItems });
     } catch (error) {
         console.error('❌ Trending Error:', error.message);
-        res.json({
-            success: true,
-            data: [{
-                id: 550,
-                title: "Fight Club",
-                name: "Fight Club",
-                media_type: "movie",
-                heroCategory: "trending",
-                backdrop_path: "/bptfVGEQuv6vDTIMVCHjJ9Dz8PX.jpg",
-                poster_path: "/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg",
-                vote_average: 8.8,
-                overview: "A ticking-time-bomb insomniac and a slippery soap salesman channel primal male aggression into a shocking new form of therapy.",
-                release_date: "1999-10-15"
-            }]
-        });
+        res.json({ success: true, data: [] });
     }
 });
 
@@ -197,15 +194,15 @@ app.get('/api/trending', async (req, res) => {
 app.get('/api/content/:category', async (req, res) => {
     const { category } = req.params;
     const { page = 1, sort = 'popularity.desc', rating = 0, year = '', type = 'movie' } = req.query;
-    
+
     try {
         let endpoint = '/discover/movie';
         let params = { page: parseInt(page), sort_by: sort };
-        
+
         if (rating > 0) params['vote_average.gte'] = parseFloat(rating);
         if (year) params['primary_release_year'] = parseInt(year);
-        
-        switch(category) {
+
+        switch (category) {
             case 'trending':
                 endpoint = '/trending/all/week';
                 params = { page: parseInt(page) };
@@ -240,11 +237,30 @@ app.get('/api/content/:category', async (req, res) => {
                 endpoint = '/discover/movie';
                 params = { page: parseInt(page), sort_by: 'popularity.desc' };
         }
-        
+
         const data = await tmdbFetch(endpoint, params);
         res.json({ success: true, data });
     } catch (error) {
         console.error(`❌ Content Error (${category}):`, error.message);
+        res.json({ success: true, data: { results: [], page: 1, total_pages: 0 } });
+    }
+});
+
+// ============ GENRE DISCOVERY (used by "fetchByGenre" on the frontend) ============
+app.get('/api/genre/:id', async (req, res) => {
+    const { id } = req.params;
+    const { page = 1, sort = 'popularity.desc', rating = 0, year = '', type = 'movie' } = req.query;
+    try {
+        const params = { page: parseInt(page), sort_by: sort, with_genres: id };
+        if (rating > 0) params['vote_average.gte'] = parseFloat(rating);
+        if (year) {
+            if (type === 'tv') params['first_air_date_year'] = parseInt(year);
+            else params['primary_release_year'] = parseInt(year);
+        }
+        const data = await tmdbFetch(`/discover/${type}`, params);
+        res.json({ success: true, data });
+    } catch (error) {
+        console.error('❌ Genre Discovery Error:', error.message);
         res.json({ success: true, data: { results: [], page: 1, total_pages: 0 } });
     }
 });
@@ -256,12 +272,8 @@ app.get('/api/genres/all', async (req, res) => {
             tmdbFetch('/genre/movie/list'),
             tmdbFetch('/genre/tv/list')
         ]);
-        
         const merged = {};
-        [...(movieGenres.genres || []), ...(tvGenres.genres || [])].forEach(g => {
-            merged[g.id] = g.name;
-        });
-        
+        [...(movieGenres.genres || []), ...(tvGenres.genres || [])].forEach(g => { merged[g.id] = g.name; });
         res.json({ success: true, data: merged });
     } catch (error) {
         res.json({ success: true, data: {} });
@@ -285,16 +297,15 @@ app.get('/api/details/:type/:id', async (req, res) => {
         const data = await tmdbFetch(`/${type}/${id}`, {
             append_to_response: 'videos,images,credits,similar,watch/providers'
         });
-        
         res.json({ success: true, data });
     } catch (error) {
-        console.error(`❌ Details Error:`, error.message);
-        res.json({ 
-            success: true, 
+        console.error('❌ Details Error:', error.message);
+        res.json({
+            success: true,
             data: {
                 id: parseInt(id),
-                title: "Movie Not Found",
-                name: "Movie Not Found",
+                title: 'Unavailable',
+                name: 'Unavailable',
                 overview: "Sorry, we couldn't load the details for this title.",
                 poster_path: null,
                 backdrop_path: null,
@@ -310,33 +321,26 @@ app.get('/api/details/:type/:id', async (req, res) => {
 // ============ SEARCH ============
 app.get('/api/search', async (req, res) => {
     const { query, page = 1 } = req.query;
-    if (!query || query.length < 2) {
-        return res.json({ success: true, data: { results: [] } });
-    }
+    if (!query || query.length < 2) return res.json({ success: true, data: { results: [] } });
     try {
-        const data = await tmdbFetch('/search/multi', {
-            query: query,
-            page: parseInt(page)
-        });
+        const data = await tmdbFetch('/search/multi', { query, page: parseInt(page) });
         res.json({ success: true, data });
     } catch (error) {
         res.json({ success: true, data: { results: [] } });
     }
 });
 
-// ============ TRAILER ============
+// ============ TRAILER (TMDB-hosted, YouTube video id only) ============
 app.get('/api/trailer/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
-        const data = await tmdbFetch(`/${type}/${id}`, {
-            append_to_response: 'videos'
-        });
+        const data = await tmdbFetch(`/${type}/${id}`, { append_to_response: 'videos' });
         const videos = data.videos?.results || [];
-        
-        let trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') ||
-                     videos.find(v => v.site === 'YouTube' && v.type === 'Teaser') ||
-                     videos.find(v => v.site === 'YouTube');
-        
+
+        const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') ||
+                         videos.find(v => v.site === 'YouTube' && v.type === 'Teaser') ||
+                         videos.find(v => v.site === 'YouTube');
+
         if (trailer) {
             return res.json({
                 success: true,
@@ -348,15 +352,58 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
                 }
             });
         }
-        
-        res.json({ 
-            success: false, 
-            error: 'No trailer found',
-            data: null
-        });
+        res.json({ success: false, error: 'No trailer found', data: null });
     } catch (error) {
         console.error('❌ Trailer Error:', error.message);
         res.json({ success: false, error: error.message });
+    }
+});
+
+// ============ YOUTUBE SEARCH (fallback trailer lookup) ============
+app.get('/api/youtube/search', async (req, res) => {
+    const { q, maxResults = 5 } = req.query;
+    if (!q) return res.json({ success: false, error: 'Missing query', data: null });
+    if (!YOUTUBE_API_KEY) return res.json({ success: false, error: 'YouTube API not configured', data: null });
+    try {
+        const data = await youtubeFetch('/search', {
+            part: 'snippet',
+            q,
+            maxResults: parseInt(maxResults),
+            type: 'video',
+            videoEmbeddable: 'true'
+        });
+        const items = (data.items || []).map(item => ({
+            id: item.id.videoId,
+            title: item.snippet.title,
+            channelTitle: item.snippet.channelTitle,
+            thumbnail: item.snippet.thumbnails?.medium?.url || ''
+        }));
+        res.json({ success: true, data: { items } });
+    } catch (error) {
+        console.error('❌ YouTube Search Error:', error.message);
+        res.json({ success: false, error: error.message, data: null });
+    }
+});
+
+// ============ YOUTUBE VIDEO DETAILS (views/likes for trailer modal) ============
+app.get('/api/youtube/video/:id', async (req, res) => {
+    const { id } = req.params;
+    if (!YOUTUBE_API_KEY) return res.json({ success: false, error: 'YouTube API not configured', data: null });
+    try {
+        const data = await youtubeFetch('/videos', { part: 'statistics,snippet', id });
+        const video = (data.items || [])[0];
+        if (!video) return res.json({ success: false, error: 'Video not found', data: null });
+        res.json({
+            success: true,
+            data: {
+                viewCount: video.statistics?.viewCount,
+                likeCount: video.statistics?.likeCount,
+                channelTitle: video.snippet?.channelTitle
+            }
+        });
+    } catch (error) {
+        console.error('❌ YouTube Video Error:', error.message);
+        res.json({ success: false, error: error.message, data: null });
     }
 });
 
@@ -382,7 +429,7 @@ app.get('/api/episodes/:tvId/:season', async (req, res) => {
     }
 });
 
-// ============ PROVIDERS ============
+// ============ WATCH PROVIDERS (legitimate streaming availability) ============
 app.get('/api/providers/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
@@ -409,10 +456,9 @@ app.get('/api/similar/:type/:id', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 YOUFLEX Backend Server running on port ${PORT}`);
     console.log(`📍 URL: http://localhost:${PORT}`);
-    console.log(`📡 TMDB API: ${TMDB_API_KEY ? '✅ Configured' : '❌ Missing'}`);
-    console.log(`\n💡 Frontend should connect to: http://localhost:${PORT}/api/`);
-    console.log(`\n🔧 If DNS issues persist, try:`);
-    console.log(`   1. Add 8.8.8.8 as your DNS server`);
-    console.log(`   2. Restart your network adapter`);
-    console.log(`   3. Use a VPN or proxy`);
+    console.log(`📡 TMDB API: ${TMDB_API_KEY ? '✅ Configured' : '❌ Missing (set TMDB_API_KEY env var)'}`);
+    console.log(`📡 YouTube API: ${YOUTUBE_API_KEY ? '✅ Configured' : '❌ Missing (set YOUTUBE_API_KEY env var)'}`);
+    console.log(`🎬 Embed endpoints available:`);
+    console.log(`   - Movie: /api/embed/movie/:imdbId`);
+    console.log(`   - TV: /api/embed/tv/:imdbId/:season/:episode`);
 });
