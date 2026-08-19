@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const dns = require('dns');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -106,7 +105,6 @@ app.get('/api/trending', async (req, res) => {
         ];
         
         if (heroItems.length === 0) {
-            // Fallback data
             return res.json({
                 success: true,
                 data: [{
@@ -230,7 +228,7 @@ app.get('/api/genres', async (req, res) => {
     }
 });
 
-// ============ DETAILS - FIXED ============
+// ============ DETAILS ============
 app.get('/api/details/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
@@ -238,11 +236,9 @@ app.get('/api/details/:type/:id', async (req, res) => {
             append_to_response: 'videos,images,credits,similar,watch/providers'
         });
         
-        // Ensure we always return a valid response
         res.json({ success: true, data });
     } catch (error) {
         console.error(`❌ Details Error:`, error.message);
-        // Return a minimal valid response so frontend doesn't break
         res.json({ 
             success: true, 
             data: {
@@ -278,7 +274,7 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
-// ============ TRAILER - FIXED ============
+// ============ TRAILER ============
 app.get('/api/trailer/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     try {
@@ -303,11 +299,10 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
             });
         }
         
-        // Fallback: return a generic trailer
+        // Fallback: search YouTube
         const title = data.title || data.name || 'Movie';
         const year = (data.release_date || data.first_air_date || '').split('-')[0] || '2024';
         
-        // Try to find a trailer via YouTube API
         try {
             const searchQueries = [
                 `${title} ${year} official trailer`,
@@ -335,7 +330,6 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
             }
         } catch (e) {}
         
-        // If no trailer found, return a fallback with a "no trailer" message
         res.json({ 
             success: false, 
             error: 'No trailer found',
