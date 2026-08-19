@@ -1,6 +1,41 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const dns = require('dns');
+
+// ============ DNS FIX ============
+console.log('🌐 Setting up DNS fallback...');
+
+// Override DNS to use Google DNS
+const originalLookup = dns.lookup;
+dns.lookup = function(hostname, options, callback) {
+    if (typeof options === 'function') {
+        callback = options;
+        options = {};
+    }
+    // Try to resolve with original first, fallback to Google DNS
+    originalLookup(hostname, options, (err, address, family) => {
+        if (err) {
+            // If DNS fails, use Google's DNS server directly
+            const dns2 = require('dns');
+            dns2.resolve(hostname, (err2, addresses) => {
+                if (err2) {
+                    console.log(`⚠️ DNS fallback failed for ${hostname}`);
+                    return callback(err, null, null);
+                }
+                if (addresses && addresses.length > 0) {
+                    console.log(`✅ DNS fallback resolved ${hostname} -> ${addresses[0]}`);
+                    return callback(null, addresses[0], 4);
+                }
+                callback(err, null, null);
+            });
+        } else {
+            callback(err, address, family);
+        }
+    });
+};
+
+console.log('🌐 DNS override active');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -10,7 +45,6 @@ const TMDB_API_KEY = '33ef7aaa3002731060f718f25dd995ac';
 const YOUTUBE_API_KEY = 'AIzaSyCxCmXs4P4P8SenCmTlj5eawG4ccNP2FEg';
 
 console.log('🚀 YOUFLEX Backend Server Starting...');
-console.log('📡 TMDB API:', TMDB_API_KEY ? '✅ Configured' : '❌ Missing');
 
 // ============ MIDDLEWARE ============
 app.use(cors({
@@ -20,7 +54,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ============ TMDB API WITH RETRY ============
+// ============ TMDB API WITH DNS RETRY ============
 async function tmdbFetch(endpoint, params = {}, retries = 3) {
     const url = `https://api.themoviedb.org/3${endpoint}`;
     const allParams = {
@@ -30,9 +64,10 @@ async function tmdbFetch(endpoint, params = {}, retries = 3) {
     
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
+            console.log(`📡 Attempt ${attempt} for ${endpoint}`);
             const response = await axios.get(url, {
                 params: allParams,
-                timeout: 15000,
+                timeout: 20000,
                 headers: {
                     'Accept': 'application/json',
                     'User-Agent': 'YOUFLEX/1.0'
@@ -40,11 +75,26 @@ async function tmdbFetch(endpoint, params = {}, retries = 3) {
             });
             return response.data;
         } catch (error) {
-            console.error(`❌ Attempt ${attempt} failed:`, error.message);
+            console.error(`❌ Attempt ${attempt} failed:`, error.code || error.message);
+            if (error.code === 'ENOTFOUND') {
+                // Try to resolve DNS again
+                try {
+                    await new Promise((resolve, reject) => {
+                        dns.lookup('api.themoviedb.org', (err) => {
+                            if (err) reject(err);
+                            else resolve();
+                        });
+                    });
+                    console.log('✅ DNS resolved successfully');
+                } catch (dnsError) {
+                    console.log('⚠️ DNS still failing, waiting...');
+                }
+            }
             if (attempt === retries) {
+                console.log(`❌ All ${retries} attempts failed for ${endpoint}`);
                 return { results: [] };
             }
-            await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+            await new Promise(resolve => setTimeout(resolve, attempt * 2000));
         }
     }
 }
@@ -299,37 +349,6 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
             });
         }
         
-        // Fallback: search YouTube
-        const title = data.title || data.name || 'Movie';
-        const year = (data.release_date || data.first_air_date || '').split('-')[0] || '2024';
-        
-        try {
-            const searchQueries = [
-                `${title} ${year} official trailer`,
-                `${title} official trailer`,
-                `${title} trailer`
-            ];
-            
-            for (const query of searchQueries) {
-                try {
-                    const response = await axios.get(`https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(query)}&part=snippet&maxResults=3&type=video&videoEmbeddable=true`);
-                    
-                    if (response.data.items && response.data.items.length > 0) {
-                        const video = response.data.items[0];
-                        return res.json({
-                            success: true,
-                            data: {
-                                key: video.id.videoId,
-                                name: video.snippet.title,
-                                embedUrl: `https://www.youtube.com/embed/${video.id.videoId}`,
-                                embedUrlAutoplay: `https://www.youtube.com/embed/${video.id.videoId}?autoplay=1&rel=0&modestbranding=1`
-                            }
-                        });
-                    }
-                } catch (e) { continue; }
-            }
-        } catch (e) {}
-        
         res.json({ 
             success: false, 
             error: 'No trailer found',
@@ -386,67 +405,14 @@ app.get('/api/similar/:type/:id', async (req, res) => {
     }
 });
 
-// ============ YOUTUBE SEARCH ============
-app.get('/api/youtube/search', async (req, res) => {
-    const { q, maxResults = 5 } = req.query;
-    
-    if (!q || q.length < 2) {
-        return res.json({ success: true, data: { items: [] } });
-    }
-    try {
-        const response = await axios.get(`https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(q)}&part=snippet&maxResults=${maxResults}&type=video&videoEmbeddable=true`);
-        
-        if (response.data.items) {
-            const videos = response.data.items.map(item => ({
-                id: item.id.videoId,
-                title: item.snippet.title,
-                thumbnail: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.default?.url,
-                channelTitle: item.snippet.channelTitle,
-                embedUrl: `https://www.youtube.com/embed/${item.id.videoId}`
-            }));
-            res.json({ success: true, data: { items: videos } });
-        } else {
-            res.json({ success: true, data: { items: [] } });
-        }
-    } catch (error) {
-        console.error('❌ YouTube Search Error:', error.message);
-        res.json({ success: true, data: { items: [] } });
-    }
-});
-
-// ============ YOUTUBE VIDEO DETAILS ============
-app.get('/api/youtube/video/:id', async (req, res) => {
-    const { id } = req.params;
-    try {
-        const response = await axios.get(`https://www.googleapis.com/youtube/v3/videos?key=${YOUTUBE_API_KEY}&id=${id}&part=snippet,statistics,contentDetails`);
-        
-        if (response.data.items && response.data.items.length > 0) {
-            const video = response.data.items[0];
-            res.json({
-                success: true,
-                data: {
-                    id: video.id,
-                    title: video.snippet.title,
-                    channelTitle: video.snippet.channelTitle,
-                    viewCount: video.statistics?.viewCount || '0',
-                    likeCount: video.statistics?.likeCount || '0',
-                    embedUrl: `https://www.youtube.com/embed/${video.id}`
-                }
-            });
-        } else {
-            res.json({ success: false, error: 'Video not found' });
-        }
-    } catch (error) {
-        console.error('❌ YouTube Video Error:', error.message);
-        res.json({ success: false, error: error.message });
-    }
-});
-
 // ============ START SERVER ============
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 YOUFLEX Backend Server running on port ${PORT}`);
     console.log(`📍 URL: http://localhost:${PORT}`);
     console.log(`📡 TMDB API: ${TMDB_API_KEY ? '✅ Configured' : '❌ Missing'}`);
-    console.log(`🎬 YouTube API: ✅ Configured`);
     console.log(`\n💡 Frontend should connect to: http://localhost:${PORT}/api/`);
+    console.log(`\n🔧 If DNS issues persist, try:`);
+    console.log(`   1. Add 8.8.8.8 as your DNS server`);
+    console.log(`   2. Restart your network adapter`);
+    console.log(`   3. Use a VPN or proxy`);
 });
