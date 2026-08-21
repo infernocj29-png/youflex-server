@@ -179,8 +179,8 @@ app.get('/', (req, res) => {
             trailer: '/api/trailer/:type/:id',
             youtubeSearch: '/api/youtube/search?q=...',
             youtubeVideo: '/api/youtube/video/:id',
-            embedMovie: '/api/embed/movie/:imdbId',
-            embedEpisode: '/api/embed/tv/:imdbId/:season/:episode'
+            embedMovie: '/api/embed/movie/:tmdbId',
+            embedEpisode: '/api/embed/tv/:tmdbId/:season/:episode'
         }
     });
 });
@@ -203,30 +203,32 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// ============ UPDATED EMBED MOVIE - vidsrc.to ============
-app.get('/api/embed/movie/:imdbId', cacheMiddleware(cache.embed, (req) => `movie:${req.params.imdbId}`), (req, res) => {
-    const { imdbId } = req.params;
+// ============ UPDATED EMBED MOVIE - vidsrc.me ============
+app.get('/api/embed/movie/:tmdbId', cacheMiddleware(cache.embed, (req) => `movie:${req.params.tmdbId}`), (req, res) => {
+    const { tmdbId } = req.params;
     
-    if (!imdbId || !/^tt\d+$/.test(imdbId)) {
+    // Validate TMDB ID (numeric)
+    if (!tmdbId || !/^\d+$/.test(tmdbId)) {
         return res.status(400).json({
             success: false,
-            error: 'Invalid IMDb ID format. Must start with "tt" followed by numbers.'
+            error: 'Invalid TMDB ID format. Must be a number.'
         });
     }
 
-    // Updated to vidsrc.to
-    const embedUrl = `https://vidsrc.to/embed/movie/${imdbId}`;
+    // Updated to vidsrc.me with TMDB ID
+    const embedUrl = `https://vidsrc.me/embed/movie?tmdb=${tmdbId}`;
     const embedHtml = `
         <iframe src="${embedUrl}"
                 width="100%" height="100%" frameborder="0"
                 allowfullscreen
-                allow="autoplay; encrypted-media; fullscreen"></iframe>
+                allow="autoplay; encrypted-media; fullscreen"
+                referrerpolicy="strict-origin-when-cross-origin"></iframe>
     `;
 
     res.json({
         success: true,
         data: {
-            imdbId: imdbId,
+            tmdbId: tmdbId,
             embedUrl: embedUrl,
             html: embedHtml,
             type: 'movie'
@@ -234,14 +236,15 @@ app.get('/api/embed/movie/:imdbId', cacheMiddleware(cache.embed, (req) => `movie
     });
 });
 
-// ============ UPDATED EMBED TV EPISODE - vidsrc.to ============
-app.get('/api/embed/tv/:imdbId/:season/:episode', cacheMiddleware(cache.embed, (req) => `tv:${req.params.imdbId}:${req.params.season}:${req.params.episode}`), (req, res) => {
-    const { imdbId, season, episode } = req.params;
+// ============ UPDATED EMBED TV EPISODE - vidsrc.me ============
+app.get('/api/embed/tv/:tmdbId/:season/:episode', cacheMiddleware(cache.embed, (req) => `tv:${req.params.tmdbId}:${req.params.season}:${req.params.episode}`), (req, res) => {
+    const { tmdbId, season, episode } = req.params;
     
-    if (!imdbId || !/^tt\d+$/.test(imdbId)) {
+    // Validate TMDB ID (numeric)
+    if (!tmdbId || !/^\d+$/.test(tmdbId)) {
         return res.status(400).json({
             success: false,
-            error: 'Invalid IMDb ID format. Must start with "tt" followed by numbers.'
+            error: 'Invalid TMDB ID format. Must be a number.'
         });
     }
 
@@ -255,20 +258,21 @@ app.get('/api/embed/tv/:imdbId/:season/:episode', cacheMiddleware(cache.embed, (
         });
     }
 
-    // Updated to vidsrc.to - uses IMDb ID format with tt prefix
-    const embedUrl = `https://vidsrc.to/embed/tv/${imdbId}/${seasonNum}/${episodeNum}`;
+    // Updated to vidsrc.me with TMDB ID and season/episode
+    const embedUrl = `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNum}&episode=${episodeNum}`;
     const embedHtml = `
-        <!-- ${imdbId}, season ${seasonNum}, episode ${episodeNum} -->
+        <!-- TMDB: ${tmdbId}, season ${seasonNum}, episode ${episodeNum} -->
         <iframe src="${embedUrl}"
                 width="100%" height="100%" frameborder="0"
                 allowfullscreen
-                allow="autoplay; encrypted-media; fullscreen"></iframe>
+                allow="autoplay; encrypted-media; fullscreen"
+                referrerpolicy="strict-origin-when-cross-origin"></iframe>
     `;
 
     res.json({
         success: true,
         data: {
-            imdbId: imdbId,
+            tmdbId: tmdbId,
             season: seasonNum,
             episode: episodeNum,
             embedUrl: embedUrl,
@@ -574,7 +578,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📡 TMDB API: ${TMDB_API_KEY ? '✅ Configured' : '❌ Missing'}`);
     console.log(`📡 YouTube API: ${YOUTUBE_API_KEY ? '✅ Configured' : '❌ Missing'}`);
     console.log(`📦 Server-side caching enabled with 5-30 minute TTL`);
-    console.log(`🎬 Embed endpoints available (vidsrc.to):`);
-    console.log(`   - Movie: /api/embed/movie/:imdbId`);
-    console.log(`   - TV: /api/embed/tv/:imdbId/:season/:episode`);
+    console.log(`🎬 Embed endpoints available (vidsrc.me):`);
+    console.log(`   - Movie: /api/embed/movie/:tmdbId`);
+    console.log(`   - TV: /api/embed/tv/:tmdbId/:season/:episode`);
 });
