@@ -207,7 +207,6 @@ app.get('/api/health', (req, res) => {
 app.get('/api/embed/movie/:tmdbId', cacheMiddleware(cache.embed, (req) => `movie:${req.params.tmdbId}`), (req, res) => {
     const { tmdbId } = req.params;
     
-    // Validate TMDB ID (numeric)
     if (!tmdbId || !/^\d+$/.test(tmdbId)) {
         return res.status(400).json({
             success: false,
@@ -215,7 +214,6 @@ app.get('/api/embed/movie/:tmdbId', cacheMiddleware(cache.embed, (req) => `movie
         });
     }
 
-    // Updated to vidsrc.me with TMDB ID
     const embedUrl = `https://vidsrc.me/embed/movie?tmdb=${tmdbId}`;
     const embedHtml = `
         <iframe src="${embedUrl}"
@@ -240,7 +238,6 @@ app.get('/api/embed/movie/:tmdbId', cacheMiddleware(cache.embed, (req) => `movie
 app.get('/api/embed/tv/:tmdbId/:season/:episode', cacheMiddleware(cache.embed, (req) => `tv:${req.params.tmdbId}:${req.params.season}:${req.params.episode}`), (req, res) => {
     const { tmdbId, season, episode } = req.params;
     
-    // Validate TMDB ID (numeric)
     if (!tmdbId || !/^\d+$/.test(tmdbId)) {
         return res.status(400).json({
             success: false,
@@ -258,10 +255,8 @@ app.get('/api/embed/tv/:tmdbId/:season/:episode', cacheMiddleware(cache.embed, (
         });
     }
 
-    // Updated to vidsrc.me with TMDB ID and season/episode
     const embedUrl = `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNum}&episode=${episodeNum}`;
     const embedHtml = `
-        <!-- TMDB: ${tmdbId}, season ${seasonNum}, episode ${episodeNum} -->
         <iframe src="${embedUrl}"
                 width="100%" height="100%" frameborder="0"
                 allowfullscreen
@@ -456,25 +451,36 @@ app.get('/api/trailer/:type/:id', cacheMiddleware(cache.youtube, (req) => `trail
         const data = await tmdbFetch(`/${type}/${id}`, { append_to_response: 'videos' });
         const videos = data.videos?.results || [];
 
+        // Try to find the best trailer
         const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') ||
                          videos.find(v => v.site === 'YouTube' && v.type === 'Teaser') ||
                          videos.find(v => v.site === 'YouTube');
 
-        if (trailer) {
+        if (trailer && trailer.key) {
             return res.json({
                 success: true,
                 data: {
                     key: trailer.key,
-                    name: trailer.name,
+                    name: trailer.name || 'Official Trailer',
                     embedUrl: `https://www.youtube.com/embed/${trailer.key}`,
                     embedUrlAutoplay: `https://www.youtube.com/embed/${trailer.key}?autoplay=1&rel=0&modestbranding=1`
                 }
             });
         }
-        res.json({ success: false, error: 'No trailer found', data: null });
+        
+        // No trailer found
+        res.json({ 
+            success: false, 
+            error: 'No trailer found',
+            data: null 
+        });
     } catch (error) {
         console.error('❌ Trailer Error:', error.message);
-        res.json({ success: false, error: error.message });
+        res.json({ 
+            success: false, 
+            error: error.message,
+            data: null 
+        });
     }
 });
 
@@ -482,7 +488,9 @@ app.get('/api/trailer/:type/:id', cacheMiddleware(cache.youtube, (req) => `trail
 app.get('/api/youtube/search', cacheMiddleware(cache.youtube, (req) => `ytsearch:${req.query.q}:${req.query.maxResults || 5}`), async (req, res) => {
     const { q, maxResults = 5 } = req.query;
     if (!q) return res.json({ success: false, error: 'Missing query', data: null });
-    if (!YOUTUBE_API_KEY) return res.json({ success: false, error: 'YouTube API not configured', data: null });
+    if (!YOUTUBE_API_KEY) {
+        return res.json({ success: false, error: 'YouTube API not configured', data: null });
+    }
     try {
         const data = await youtubeFetch('/search', {
             part: 'snippet',
