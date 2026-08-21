@@ -21,7 +21,7 @@ app.use(express.json());
 
 // ============ SERVER-SIDE CACHE ============
 class Cache {
-    constructor(ttl = 5 * 60 * 1000) { // 5 minutes default
+    constructor(ttl = 5 * 60 * 1000) {
         this.cache = new Map();
         this.ttl = ttl;
     }
@@ -47,7 +47,6 @@ class Cache {
         this.cache.clear();
     }
 
-    // Get cache stats
     getStats() {
         let total = 0;
         let expired = 0;
@@ -59,36 +58,31 @@ class Cache {
     }
 }
 
-// Create cache instances with different TTLs
 const cache = {
-    trending: new Cache(3 * 60 * 1000),    // 3 minutes for trending
-    details: new Cache(10 * 60 * 1000),    // 10 minutes for details
-    search: new Cache(2 * 60 * 1000),      // 2 minutes for search
-    genres: new Cache(30 * 60 * 1000),     // 30 minutes for genres
-    credits: new Cache(10 * 60 * 1000),    // 10 minutes for credits
-    similar: new Cache(10 * 60 * 1000),    // 10 minutes for similar
-    providers: new Cache(10 * 60 * 1000),  // 10 minutes for providers
-    episodes: new Cache(10 * 60 * 1000),   // 10 minutes for episodes
-    youtube: new Cache(5 * 60 * 1000),     // 5 minutes for YouTube data
-    embed: new Cache(60 * 60 * 1000),      // 1 hour for embed URLs
+    trending: new Cache(3 * 60 * 1000),
+    details: new Cache(10 * 60 * 1000),
+    search: new Cache(2 * 60 * 1000),
+    genres: new Cache(30 * 60 * 1000),
+    credits: new Cache(10 * 60 * 1000),
+    similar: new Cache(10 * 60 * 1000),
+    providers: new Cache(10 * 60 * 1000),
+    episodes: new Cache(10 * 60 * 1000),
+    youtube: new Cache(5 * 60 * 1000),
+    embed: new Cache(60 * 60 * 1000),
 };
 
-// Cache middleware
 function cacheMiddleware(cacheInstance, keyGenerator = null) {
     return (req, res, next) => {
         const key = keyGenerator ? keyGenerator(req) : req.originalUrl;
         const cached = cacheInstance.get(key);
         
         if (cached) {
-            // Add cache hit header
             res.setHeader('X-Cache', 'HIT');
             return res.json(cached);
         }
         
-        // Store original json method
         const originalJson = res.json;
         res.json = function(data) {
-            // Cache the response
             cacheInstance.set(key, data);
             res.setHeader('X-Cache', 'MISS');
             originalJson.call(this, data);
@@ -104,7 +98,6 @@ async function tmdbFetch(endpoint, params = {}, retries = 2) {
     const url = `https://api.themoviedb.org/3${endpoint}`;
     const allParams = { api_key: TMDB_API_KEY, ...params };
     
-    // Create cache key from endpoint and params
     const cacheKey = `${endpoint}${JSON.stringify(params)}`;
     const cached = tmdbCache.get(cacheKey);
     if (cached) return cached;
@@ -113,16 +106,15 @@ async function tmdbFetch(endpoint, params = {}, retries = 2) {
         try {
             const response = await axios.get(url, {
                 params: allParams,
-                timeout: 10000, // Reduced timeout for faster fail
+                timeout: 10000,
                 headers: { 'Accept': 'application/json', 'User-Agent': 'YOUFLEX/1.0' }
             });
-            // Cache successful response
             tmdbCache.set(cacheKey, response.data);
             return response.data;
         } catch (error) {
             console.error(`❌ TMDB attempt ${attempt} failed for ${endpoint}:`, error.message);
             if (attempt === retries) return { results: [] };
-            await new Promise(resolve => setTimeout(resolve, attempt * 500)); // Reduced backoff
+            await new Promise(resolve => setTimeout(resolve, attempt * 500));
         }
     }
 }
@@ -211,7 +203,7 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// ============ EMBED MOVIE ============
+// ============ UPDATED EMBED MOVIE - vidsrc.to ============
 app.get('/api/embed/movie/:imdbId', cacheMiddleware(cache.embed, (req) => `movie:${req.params.imdbId}`), (req, res) => {
     const { imdbId } = req.params;
     
@@ -222,11 +214,13 @@ app.get('/api/embed/movie/:imdbId', cacheMiddleware(cache.embed, (req) => `movie
         });
     }
 
-    const embedUrl = `https://vidsrc.hair/embed/movie/${imdbId}`;
+    // Updated to vidsrc.to
+    const embedUrl = `https://vidsrc.to/embed/movie/${imdbId}`;
     const embedHtml = `
         <iframe src="${embedUrl}"
                 width="100%" height="100%" frameborder="0"
-                allowfullscreen></iframe>
+                allowfullscreen
+                allow="autoplay; encrypted-media; fullscreen"></iframe>
     `;
 
     res.json({
@@ -240,7 +234,7 @@ app.get('/api/embed/movie/:imdbId', cacheMiddleware(cache.embed, (req) => `movie
     });
 });
 
-// ============ EMBED TV EPISODE ============
+// ============ UPDATED EMBED TV EPISODE - vidsrc.to ============
 app.get('/api/embed/tv/:imdbId/:season/:episode', cacheMiddleware(cache.embed, (req) => `tv:${req.params.imdbId}:${req.params.season}:${req.params.episode}`), (req, res) => {
     const { imdbId, season, episode } = req.params;
     
@@ -261,12 +255,14 @@ app.get('/api/embed/tv/:imdbId/:season/:episode', cacheMiddleware(cache.embed, (
         });
     }
 
-    const embedUrl = `https://vidsrc.hair/embed/tv/${imdbId}/${seasonNum}/${episodeNum}`;
+    // Updated to vidsrc.to - uses IMDb ID format with tt prefix
+    const embedUrl = `https://vidsrc.to/embed/tv/${imdbId}/${seasonNum}/${episodeNum}`;
     const embedHtml = `
         <!-- ${imdbId}, season ${seasonNum}, episode ${episodeNum} -->
         <iframe src="${embedUrl}"
                 width="100%" height="100%" frameborder="0"
-                allowfullscreen></iframe>
+                allowfullscreen
+                allow="autoplay; encrypted-media; fullscreen"></iframe>
     `;
 
     res.json({
@@ -282,7 +278,7 @@ app.get('/api/embed/tv/:imdbId/:season/:episode', cacheMiddleware(cache.embed, (
     });
 });
 
-// ============ TRENDING (hero banner) ============
+// ============ TRENDING ============
 app.get('/api/trending', cacheMiddleware(cache.trending), async (req, res) => {
     try {
         const [trending, upcoming, nowPlaying] = await Promise.all([
@@ -578,7 +574,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📡 TMDB API: ${TMDB_API_KEY ? '✅ Configured' : '❌ Missing'}`);
     console.log(`📡 YouTube API: ${YOUTUBE_API_KEY ? '✅ Configured' : '❌ Missing'}`);
     console.log(`📦 Server-side caching enabled with 5-30 minute TTL`);
-    console.log(`🎬 Embed endpoints available:`);
+    console.log(`🎬 Embed endpoints available (vidsrc.to):`);
     console.log(`   - Movie: /api/embed/movie/:imdbId`);
     console.log(`   - TV: /api/embed/tv/:imdbId/:season/:episode`);
 });
