@@ -1,18 +1,19 @@
 {
   "name": "youflex-backend",
-  "version": "1.0.0",
-  "description": "YOUFLEX Backend API Server",
+  "version": "2.0.0",
+  "description": "YOUFLEX backend — TMDB + YouTube proxy API with embed support",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "@distube/ytdl-core": "^4.16.12",
+    "axios": "^1.6.0",
     "cors": "^2.8.5",
-    "axios": "^1.4.0"
-  },
-  "devDependencies": {
-    "nodemon": "^2.0.22"
+    "express": "^4.18.2"
   }
 }
