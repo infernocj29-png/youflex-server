@@ -42,7 +42,7 @@ app.use(cors({
     origin: (origin, cb) => {
         if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
         console.log('⚠️  CORS request from unknown origin:', origin);
-        cb(null, true); // allow but log
+        cb(null, true);
     },
     methods: ['GET','POST','PUT','DELETE','OPTIONS'],
     allowedHeaders: ['Content-Type','Authorization'],
@@ -141,10 +141,8 @@ async function youtubeFetch(endpoint, params = {}) {
 }
 
 // ============================================================
-// VIDSRC EMBED SOURCES  (ordered by reliability)
+// VIDSRC EMBED SOURCES (ordered by reliability)
 // ============================================================
-// All sources support both movie & TV with TMDB IDs.
-// TV URL pattern: https://<host>/embed/<type>?tmdb=<id>&season=<s>&episode=<e>
 const EMBED_SOURCES = [
     {
         id: 'vidsrc_me',
@@ -196,7 +194,7 @@ function buildEmbedPayload(type, tmdbId, season, episode, source = EMBED_SOURCES
 }
 
 // ============================================================
-// TRAILER SYSTEM
+// TRAILER SYSTEM (unchanged)
 // ============================================================
 async function getTrailerFromTMDB(type, id) {
     try {
@@ -289,7 +287,7 @@ app.get('/api/health', (req, res) => res.json({
 }));
 
 // ============================================================
-// EMBED — MOVIE  (TMDB ID)
+// EMBED — MOVIE (TMDB ID)
 // ============================================================
 app.get('/api/embed/movie/:tmdbId',
     cacheMW(C.embed, r => `embed:movie:${r.params.tmdbId}:${r.query.source||'vidsrc_me'}`),
@@ -303,7 +301,7 @@ app.get('/api/embed/movie/:tmdbId',
 );
 
 // ============================================================
-// EMBED — TV  (TMDB ID + season + episode)
+// EMBED — TV (TMDB ID + season + episode)
 // ============================================================
 app.get('/api/embed/tv/:tmdbId/:season/:episode',
     cacheMW(C.embed, r => `embed:tv:${r.params.tmdbId}:${r.params.season}:${r.params.episode}:${r.query.source||'vidsrc_me'}`),
@@ -320,7 +318,7 @@ app.get('/api/embed/tv/:tmdbId/:season/:episode',
 );
 
 // ============================================================
-// EMBED — MOVIE  (IMDB ID)
+// EMBED — MOVIE (IMDB ID) - KEPT FOR BACKWARD COMPATIBILITY
 // ============================================================
 app.get('/api/embed/movie/imdb/:imdbId',
     cacheMW(C.embed, r => `embed:movie:imdb:${r.params.imdbId}`),
@@ -334,7 +332,7 @@ app.get('/api/embed/movie/imdb/:imdbId',
 );
 
 // ============================================================
-// EMBED — TV  (IMDB ID)
+// EMBED — TV (IMDB ID) - UPDATED TO USE TMDB ID INTERNALLY
 // ============================================================
 app.get('/api/embed/tv/imdb/:imdbId/:season/:episode',
     cacheMW(C.embed, r => `embed:tv:imdb:${r.params.imdbId}:${r.params.season}:${r.params.episode}`),
@@ -344,6 +342,35 @@ app.get('/api/embed/tv/imdb/:imdbId/:season/:episode',
             return res.status(400).json({ success: false, error: 'Invalid IMDB ID.' });
         const s = parseInt(season), e = parseInt(episode);
         if (isNaN(s) || isNaN(e)) return res.status(400).json({ success: false, error: 'Invalid season/episode.' });
+        
+        // Try to get TMDB ID from IMDB ID
+        try {
+            // Try to find the TMDB ID by searching
+            const searchResult = await tmdbFetch('/find/' + imdbId, { external_source: 'imdb_id' });
+            const results = searchResult?.tv_results || [];
+            
+            if (results.length > 0) {
+                const tmdbId = results[0].id;
+                // Use the TMDB-based embed URL
+                const embedUrl = `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${s}&episode=${e}`;
+                return res.json({ 
+                    success: true, 
+                    data: { 
+                        imdbId, 
+                        tmdbId,
+                        season: s, 
+                        episode: e, 
+                        type: 'tv', 
+                        embedUrl,
+                        html: `<iframe src="${embedUrl}" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`
+                    } 
+                });
+            }
+        } catch (error) {
+            console.warn(`Could not convert IMDB ID ${imdbId} to TMDB ID:`, error.message);
+        }
+
+        // Fallback: Use IMDB-based URL directly (less reliable but works sometimes)
         const embedUrl = `https://vidsrc.me/embed/tv?imdb=${imdbId}&season=${s}&episode=${e}`;
         res.json({ success: true, data: { imdbId, season: s, episode: e, type: 'tv', embedUrl } });
     }
@@ -351,8 +378,6 @@ app.get('/api/embed/tv/imdb/:imdbId/:season/:episode',
 
 // ============================================================
 // EMBED — ALL SOURCES LIST
-// Returns every source URL for a given media so the frontend
-// can fall back automatically when one fails.
 // ============================================================
 app.get('/api/embed/sources/:type/:tmdbId', (req, res) => {
     const { type, tmdbId } = req.params;
@@ -372,7 +397,7 @@ app.get('/api/embed/sources/:type/:tmdbId', (req, res) => {
 });
 
 // ============================================================
-// TV SEASON DETAILS  (episode list with stills)
+// TV SEASON DETAILS
 // ============================================================
 app.get('/api/tv/:tvId/season/:season',
     cacheMW(C.seasons, r => `season:${r.params.tvId}:${r.params.season}`),
@@ -388,8 +413,7 @@ app.get('/api/tv/:tvId/season/:season',
 );
 
 // ============================================================
-// TV SERIES FULL DETAILS  (seasons list + episodes per season)
-// Used by the player to build a season/episode selector.
+// TV SERIES FULL DETAILS
 // ============================================================
 app.get('/api/tv/:tvId/seasons',
     cacheMW(C.seasons, r => `seasons:${r.params.tvId}`),
@@ -406,10 +430,7 @@ app.get('/api/tv/:tvId/seasons',
 );
 
 // ============================================================
-// YTDL STREAM PROXY  (only if @distube/ytdl-core is installed)
-// GET /api/stream/:videoId?quality=highest|lowest|<itag>
-// Pipes the YouTube audio+video stream through the server so
-// the browser can play it without CORS/embed restrictions.
+// YTDL STREAM PROXY
 // ============================================================
 app.get('/api/stream/:videoId', async (req, res) => {
     if (!ytdl) return res.status(501).json({ success: false, error: 'ytdl-core not installed on this server. Run: npm install @distube/ytdl-core' });
@@ -426,7 +447,6 @@ app.get('/api/stream/:videoId', async (req, res) => {
         const format = ytdl.chooseFormat(info.formats, { quality });
         if (!format) return res.status(404).json({ success: false, error: 'No matching stream format found.' });
 
-        // Stream headers
         res.setHeader('Content-Type', format.mimeType || 'video/mp4');
         if (format.contentLength) res.setHeader('Content-Length', format.contentLength);
         res.setHeader('Accept-Ranges', 'bytes');
@@ -440,7 +460,6 @@ app.get('/api/stream/:videoId', async (req, res) => {
     }
 });
 
-// GET /api/stream/info/:videoId — formats + metadata (no proxying)
 app.get('/api/stream/info/:videoId', async (req, res) => {
     if (!ytdl) return res.status(501).json({ success: false, error: 'ytdl-core not installed.' });
 
@@ -517,7 +536,7 @@ app.get('/api/trailer/:type/:id',
 );
 
 // ============================================================
-// YOUTUBE ENDPOINTS
+// YOUTUBE ENDPOINTS (unchanged)
 // ============================================================
 app.get('/api/youtube/search',
     cacheMW(C.youtube, r => `ytsearch:${r.query.q}:${r.query.maxResults||5}`),
@@ -560,7 +579,7 @@ app.get('/api/youtube/video/:id',
 );
 
 // ============================================================
-// TMDB — TRENDING
+// TMDB ENDPOINTS (unchanged)
 // ============================================================
 app.get('/api/trending', cacheMW(C.trending), async (req, res) => {
     try {
@@ -580,9 +599,6 @@ app.get('/api/trending', cacheMW(C.trending), async (req, res) => {
     } catch { res.json({ success: true, data: [] }); }
 });
 
-// ============================================================
-// TMDB — CONTENT BY CATEGORY
-// ============================================================
 app.get('/api/content/:category',
     cacheMW(C.details, r => `content:${r.params.category}:${JSON.stringify(r.query)}`),
     async (req, res) => {
@@ -610,9 +626,6 @@ app.get('/api/content/:category',
     }
 );
 
-// ============================================================
-// TMDB — GENRE DISCOVERY
-// ============================================================
 app.get('/api/genre/:id',
     cacheMW(C.details, r => `genre:${r.params.id}:${JSON.stringify(r.query)}`),
     async (req, res) => {
@@ -628,7 +641,6 @@ app.get('/api/genre/:id',
     }
 );
 
-// GENRES ALL (merged)
 app.get('/api/genres/all', cacheMW(C.genres), async (req, res) => {
     try {
         const [mv, tv] = await Promise.all([tmdbFetch('/genre/movie/list'), tmdbFetch('/genre/tv/list')]);
@@ -638,7 +650,6 @@ app.get('/api/genres/all', cacheMW(C.genres), async (req, res) => {
     } catch { res.json({ success: true, data: {} }); }
 });
 
-// GENRES BY TYPE
 app.get('/api/genres',
     cacheMW(C.genres, r => `genres:${r.query.type||'movie'}`),
     async (req, res) => {
@@ -650,7 +661,6 @@ app.get('/api/genres',
     }
 );
 
-// DETAILS
 app.get('/api/details/:type/:id',
     cacheMW(C.details, r => `details:${r.params.type}:${r.params.id}`),
     async (req, res) => {
@@ -662,7 +672,6 @@ app.get('/api/details/:type/:id',
     }
 );
 
-// SEARCH
 app.get('/api/search',
     cacheMW(C.search, r => `search:${r.query.query}:${r.query.page||1}`),
     async (req, res) => {
@@ -675,7 +684,6 @@ app.get('/api/search',
     }
 );
 
-// CREDITS
 app.get('/api/credits/:type/:id',
     cacheMW(C.credits, r => `credits:${r.params.type}:${r.params.id}`),
     async (req, res) => {
@@ -687,7 +695,6 @@ app.get('/api/credits/:type/:id',
     }
 );
 
-// EPISODES
 app.get('/api/episodes/:tvId/:season',
     cacheMW(C.episodes, r => `episodes:${r.params.tvId}:${r.params.season}`),
     async (req, res) => {
@@ -699,7 +706,6 @@ app.get('/api/episodes/:tvId/:season',
     }
 );
 
-// WATCH PROVIDERS
 app.get('/api/providers/:type/:id',
     cacheMW(C.providers, r => `providers:${r.params.type}:${r.params.id}`),
     async (req, res) => {
@@ -711,7 +717,6 @@ app.get('/api/providers/:type/:id',
     }
 );
 
-// SIMILAR
 app.get('/api/similar/:type/:id',
     cacheMW(C.similar, r => `similar:${r.params.type}:${r.params.id}:${r.query.page||1}`),
     async (req, res) => {
@@ -725,7 +730,7 @@ app.get('/api/similar/:type/:id',
 );
 
 // ============================================================
-// ENHANCED RECOMMENDATIONS
+// ENHANCED RECOMMENDATIONS (unchanged)
 // ============================================================
 async function computeScore(src, cand) {
     const sg = new Set((src.genre_ids  || (src.genres  ||[]).map(g=>g.id)));
