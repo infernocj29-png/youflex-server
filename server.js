@@ -145,53 +145,36 @@ async function youtubeFetch(endpoint, params = {}) {
 // ============================================================
 const EMBED_SOURCES = [
     {
-        id: 'vidsrc_me',
-        label: 'VidSrc.me',
-        movieUrl:  (tmdb)           => `https://vidsrc.me/embed/movie?tmdb=${tmdb}`,
-        tvUrl:     (tmdb, s, e)     => `https://vidsrc.me/embed/tv?tmdb=${tmdb}&season=${s}&episode=${e}`,
-    },
-    {
-        id: 'vidsrc_to',
-        label: 'VidSrc.to',
-        movieUrl:  (tmdb)           => `https://vidsrc.to/embed/movie/${tmdb}`,
-        tvUrl:     (tmdb, s, e)     => `https://vidsrc.to/embed/tv/${tmdb}/${s}/${e}`,
-    },
-    {
         id: 'vidsrc_xyz',
         label: 'VidSrc.xyz',
-        movieUrl:  (tmdb)           => `https://vidsrc.xyz/embed/movie?tmdb=${tmdb}`,
-        tvUrl:     (tmdb, s, e)     => `https://vidsrc.xyz/embed/tv?tmdb=${tmdb}&season=${s}&episode=${e}`,
+        movieUrl:  (tmdb) => `https://vidsrc.xyz/embed/movie?tmdb=${tmdb}`,
+        tvUrl:     (tmdb, s, e) => `https://vidsrc.xyz/embed/tv?tmdb=${tmdb}&season=${s}&episode=${e}`,
     },
     {
         id: 'embedsu',
         label: 'Embed.su',
-        movieUrl:  (tmdb)           => `https://embed.su/embed/movie/${tmdb}`,
-        tvUrl:     (tmdb, s, e)     => `https://embed.su/embed/tv/${tmdb}/${s}/${e}`,
+        movieUrl:  (tmdb) => `https://embed.su/embed/movie/${tmdb}`,
+        tvUrl:     (tmdb, s, e) => `https://embed.su/embed/tv/${tmdb}/${s}/${e}`,
+    },
+    {
+        id: 'vidsrc_to',
+        label: 'VidSrc.to',
+        movieUrl:  (tmdb) => `https://vidsrc.to/embed/movie/${tmdb}`,
+        tvUrl:     (tmdb, s, e) => `https://vidsrc.to/embed/tv/${tmdb}/${s}/${e}`,
+    },
+    {
+        id: 'vidsrc_me',
+        label: 'VidSrc.me',
+        movieUrl:  (tmdb) => `https://vidsrc.me/embed/movie?tmdb=${tmdb}`,
+        tvUrl:     (tmdb, s, e) => `https://vidsrc.me/embed/tv?tmdb=${tmdb}&season=${s}&episode=${e}`,
     },
     {
         id: 'superembed',
         label: 'SuperEmbed',
-        movieUrl:  (tmdb)           => `https://multiembed.mov/directstream.php?video_id=${tmdb}&tmdb=1`,
-        tvUrl:     (tmdb, s, e)     => `https://multiembed.mov/directstream.php?video_id=${tmdb}&tmdb=1&s=${s}&e=${e}`,
+        movieUrl:  (tmdb) => `https://multiembed.mov/directstream.php?video_id=${tmdb}&tmdb=1`,
+        tvUrl:     (tmdb, s, e) => `https://multiembed.mov/directstream.php?video_id=${tmdb}&tmdb=1&s=${s}&e=${e}`,
     },
 ];
-
-function buildEmbedPayload(type, tmdbId, season, episode, source = EMBED_SOURCES[0]) {
-    const isTV  = type === 'tv';
-    const url   = isTV ? source.tvUrl(tmdbId, season, episode) : source.movieUrl(tmdbId);
-    const iframeAttr = `src="${url}" width="100%" height="100%" frameborder="0" allowfullscreen allow="autoplay; encrypted-media; fullscreen" referrerpolicy="origin"`;
-    return {
-        sourceId:      source.id,
-        sourceLabel:   source.label,
-        embedUrl:      url,
-        html:          `<iframe ${iframeAttr}></iframe>`,
-        allSources:    EMBED_SOURCES.map(s => ({
-            id:    s.id,
-            label: s.label,
-            url:   isTV ? s.tvUrl(tmdbId, season, episode) : s.movieUrl(tmdbId),
-        })),
-    };
-}
 
 // ============================================================
 // TRAILER SYSTEM (unchanged)
