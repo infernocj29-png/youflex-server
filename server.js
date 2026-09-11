@@ -11,6 +11,15 @@ try {
     console.warn('⚠️  ytdl-core not installed — stream proxy disabled');
 }
 
+// ── vidsrc-scraper (optional) ──
+let scrapeVidsrc = null;
+try {
+    ({ scrapeVidsrc } = require('@definisi/vidsrc-scraper'));
+    console.log('✅ vidsrc-scraper loaded');
+} catch (_) {
+    console.warn('⚠️  vidsrc-scraper not installed — stream extraction disabled');
+}
+
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
@@ -54,7 +63,7 @@ app.use(express.json());
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 setInterval(() => {
     axios.get(`${SELF_URL}/api/health`).catch(() => {});
-}, 14 * 60 * 1000); // ping every 14 minutes
+}, 14 * 60 * 1000);
 
 // ============================================================
 // CACHE CLASS
@@ -93,6 +102,7 @@ const C = {
     recommendations: new Cache(30 * 60 * 1000),
     trailer:         new Cache(30 * 60 * 1000),
     seasons:         new Cache(10 * 60 * 1000),
+    streamExtract:   new Cache(10 * 60 * 1000),
 };
 
 function cacheMW(cache, keyFn = null) {
@@ -162,7 +172,7 @@ async function youtubeFetch(endpoint, params = {}) {
 }
 
 // ============================================================
-// EMBED SOURCES (iframe-friendly, ordered by reliability)
+// EMBED SOURCES
 // ============================================================
 const EMBED_SOURCES = [
     {
@@ -197,9 +207,6 @@ const EMBED_SOURCES = [
     },
 ];
 
-// ============================================================
-// BUILD EMBED PAYLOAD (was missing — caused crash)
-// ============================================================
 function buildEmbedPayload(type, tmdbId, season, episode, src) {
     const embedUrl = type === 'tv'
         ? src.tvUrl(tmdbId, season, episode)
@@ -343,10 +350,11 @@ async function getTrailer(type, id) {
 // ============================================================
 app.get('/', (req, res) => res.json({
     name:         'YOUFLEX API',
-    version:      '2.2.0',
+    version:      '2.3.0',
     status:       'running',
     embedSources: EMBED_SOURCES.map(s => s.label),
     ytdlActive:   !!ytdl,
+    scraperActive: !!scrapeVidsrc,
 }));
 
 // ============================================================
@@ -356,6 +364,7 @@ app.get('/api/health', (req, res) => res.json({
     status:    'OK',
     timestamp: new Date().toISOString(),
     ytdlActive: !!ytdl,
+    scraperActive: !!scrapeVidsrc,
     cache:     Object.fromEntries(Object.entries(C).map(([k, v]) => [k, v.stats()])),
     services:  {
         tmdb:    { configured: !!TMDB_API_KEY },
@@ -415,7 +424,7 @@ app.get('/api/embed/tv/:tmdbId/:season/:episode',
 );
 
 // ============================================================
-// EMBED — IMDB MOVIE (backward compat)
+// EMBED — IMDB MOVIE
 // ============================================================
 app.get('/api/embed/movie/imdb/:imdbId',
     cacheMW(C.embed, r => `embed:movie:imdb:${r.params.imdbId}`),
@@ -437,7 +446,7 @@ app.get('/api/embed/movie/imdb/:imdbId',
 );
 
 // ============================================================
-// EMBED — IMDB TV (backward compat)
+// EMBED — IMDB TV
 // ============================================================
 app.get('/api/embed/tv/imdb/:imdbId/:season/:episode',
     cacheMW(C.embed, r => `embed:tv:imdb:${r.params.imdbId}:${r.params.season}:${r.params.episode}`),
@@ -501,6 +510,113 @@ app.get('/api/embed/sources/:type/:tmdbId', (req, res) => {
     }));
 
     res.json({ success: true, data: { type, tmdbId, season: s, episode: e, sources } });
+});
+
+// ============================================================
+// STREAM EXTRACTION (TMDB ID → HLS URL via vidsrc-scraper)
+// ============================================================
+app.get('/api/stream/extract/movie/:tmdbId',
+    cacheMW(C.streamExtract, r => `extract:movie:${r.params.tmdbId}`),
+    async (req, res) => {
+        if (!scrapeVidsrc)
+            return res.status(501).json({ success: false, error: 'vidsrc-scraper not installed' });
+
+        const { tmdbId } = req.params;
+        if (!/^\d+$/.test(tmdbId))
+            return res.status(400).json({ success: false, error: 'Invalid TMDB ID' });
+
+        try {
+            const result = await scrapeVidsrc(tmdbId, 'movie');
+            if (!result || !result.success)
+                return res.status(404).json({ success: false, error: 'No stream found', data: null });
+
+            res.json({
+                success: true,
+                data: {
+                    tmdbId,
+                    type: 'movie',
+                    hlsUrl:    result.hlsUrl,
+                    subtitles: result.subtitles || [],
+                    note:      'HLS stream URL — use an HLS-capable player or downloader',
+                    expiresIn: 600,
+                },
+            });
+        } catch (err) {
+            console.error('Movie extract error:', err.message);
+            res.status(500).json({ success: false, error: err.message, data: null });
+        }
+    },
+);
+
+app.get('/api/stream/extract/tv/:tmdbId/:season/:episode',
+    cacheMW(C.streamExtract, r => `extract:tv:${r.params.tmdbId}:${r.params.season}:${r.params.episode}`),
+    async (req, res) => {
+        if (!scrapeVidsrc)
+            return res.status(501).json({ success: false, error: 'vidsrc-scraper not installed' });
+
+        const { tmdbId, season, episode } = req.params;
+        const s = parseInt(season), e = parseInt(episode);
+        if (!/^\d+$/.test(tmdbId) || isNaN(s) || isNaN(e) || s < 1 || e < 1)
+            return res.status(400).json({ success: false, error: 'Invalid parameters' });
+
+        try {
+            const result = await scrapeVidsrc(tmdbId, 'tv', season, episode);
+            if (!result || !result.success)
+                return res.status(404).json({ success: false, error: 'No stream found', data: null });
+
+            res.json({
+                success: true,
+                data: {
+                    tmdbId, season: s, episode: e, type: 'tv',
+                    hlsUrl:    result.hlsUrl,
+                    subtitles: result.subtitles || [],
+                    note:      'HLS stream URL — use an HLS-capable player or downloader',
+                    expiresIn: 600,
+                },
+            });
+        } catch (err) {
+            console.error('TV extract error:', err.message);
+            res.status(500).json({ success: false, error: err.message, data: null });
+        }
+    },
+);
+
+// Proxy HLS stream (adds proper headers so the browser can access it)
+app.get('/api/stream/proxy', async (req, res) => {
+    const { url, filename } = req.query;
+    if (!url) return res.status(400).json({ success: false, error: 'Missing url' });
+
+    let parsed;
+    try { parsed = new URL(url); } catch { return res.status(400).json({ success: false, error: 'Invalid URL' }); }
+
+    try {
+        const upstream = await axios({
+            method: 'GET',
+            url,
+            responseType: 'stream',
+            timeout: 30000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0',
+                'Referer':    'https://cloudnestra.com/',
+                'Origin':     'https://cloudnestra.com',
+            },
+        });
+
+        const ct = upstream.headers['content-type'] || 'application/vnd.apple.mpegurl';
+        res.setHeader('Content-Type', ct);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        if (filename) {
+            res.setHeader('Content-Disposition', `attachment; filename="${filename.replace(/[^\w.\- ]/g, '_')}"`);
+        }
+        upstream.data.pipe(res);
+        upstream.data.on('error', () => { if (!res.headersSent) res.status(502).end(); });
+    } catch (err) {
+        if (!res.headersSent) res.status(502).json({ success: false, error: err.message });
+    }
+});
+
+app.get('/api/stream/extract/status', (req, res) => {
+    res.json({ success: true, scraperAvailable: !!scrapeVidsrc });
 });
 
 // ============================================================
@@ -637,7 +753,7 @@ app.get('/api/youtube/video/:id',
 );
 
 // ============================================================
-// YTDL STREAM PROXY (optional)
+// YTDL STREAM PROXY
 // ============================================================
 app.get('/api/stream/info/:videoId', async (req, res) => {
     if (!ytdl) return res.status(501).json({ success: false, error: 'ytdl-core not installed.' });
@@ -1036,11 +1152,12 @@ app.use((err, req, res, next) => {
 // START
 // ============================================================
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 YOUFLEX Backend v2.2 running on port ${PORT}`);
+    console.log(`\n🚀 YOUFLEX Backend v2.3 running on port ${PORT}`);
     console.log(`🎬 Embed sources: ${EMBED_SOURCES.map(s => s.label).join(', ')}`);
     console.log(`📺 TV:      GET /api/embed/tv/:tmdbId/:season/:episode`);
     console.log(`🎥 Movie:   GET /api/embed/movie/:tmdbId`);
     console.log(`📋 Sources: GET /api/embed/sources/:type/:tmdbId`);
+    console.log(`⬇️  Extract: GET /api/stream/extract/{movie|tv}/:tmdbId ${scrapeVidsrc ? '✅' : '❌'}`);
     console.log(`🔀 Stream:  ${ytdl ? 'GET /api/stream/:videoId ✅' : '❌ ytdl not installed'}`);
     console.log(`❤️  Health:  GET /api/health\n`);
 });
