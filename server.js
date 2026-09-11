@@ -18,9 +18,9 @@ async function initVidsrcScraper() {
         const pkg = await import('@definisi/vidsrc-scraper');
         scrapeVidsrc = pkg.scrapeVidsrc || pkg.default || pkg.scrape || null;
         if (typeof scrapeVidsrc === 'function') {
-            console.log('✅ vidsrc-scraper loaded via dynamic import — fn:', scrapeVidsrc.name, '| args:', scrapeVidsrc.length);
+            console.log('✅ vidsrc-scraper loaded — fn:', scrapeVidsrc.name, '| args:', scrapeVidsrc.length);
         } else {
-            console.warn('⚠️  vidsrc-scraper: no callable export found. Exports:', Object.keys(pkg));
+            console.warn('⚠️  vidsrc-scraper: no callable export. Exports:', Object.keys(pkg));
             scrapeVidsrc = null;
         }
     } catch (err) {
@@ -354,11 +354,102 @@ async function getTrailer(type, id) {
 }
 
 // ============================================================
+// MANUAL VIDSRC FALLBACK EXTRACTOR
+// ============================================================
+async function manualVidSrcExtract(tmdbId, type = 'movie', season = null, episode = null) {
+    const embedUrl = type === 'tv'
+        ? `https://vidsrc.xyz/embed/tv?tmdb=${tmdbId}&season=${season}&episode=${episode}`
+        : `https://vidsrc.xyz/embed/movie?tmdb=${tmdbId}`;
+
+    try {
+        const pageRes = await axios.get(embedUrl, {
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://vidsrc.xyz/',
+            },
+        });
+
+        const iframeMatch = pageRes.data.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+        if (!iframeMatch) return { success: false, error: 'No iframe in embed page' };
+
+        const iframeUrl = iframeMatch[1].startsWith('http')
+            ? iframeMatch[1]
+            : `https:${iframeMatch[1]}`;
+
+        const innerRes = await axios.get(iframeUrl, {
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': embedUrl,
+            },
+        });
+
+        const m3u8Match = innerRes.data.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/);
+        if (m3u8Match) {
+            return {
+                success: true,
+                hlsUrl: m3u8Match[1],
+                subtitles: [],
+                source: 'manual-vidsrc.xyz',
+            };
+        }
+
+        return { success: false, error: 'No m3u8 found in iframe content' };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+
+// ============================================================
+// EXTRACTION ORCHESTRATORS
+// ============================================================
+async function tryExtractMovie(tmdbId) {
+    if (scrapeVidsrc) {
+        try {
+            const result = await scrapeVidsrc(tmdbId, 'movie');
+            if (result?.success && result.hlsUrl) {
+                return { ...result, source: 'vidsrc-scraper' };
+            }
+        } catch (e) {
+            console.warn('vidsrc-scraper movie failed:', e.message);
+        }
+    }
+    try {
+        const fallback = await manualVidSrcExtract(tmdbId, 'movie');
+        if (fallback.success) return fallback;
+    } catch (e) {
+        console.warn('Manual fallback failed:', e.message);
+    }
+    return { success: false, error: 'All extraction sources failed' };
+}
+
+async function tryExtractTV(tmdbId, season, episode) {
+    if (scrapeVidsrc) {
+        try {
+            const result = await scrapeVidsrc(tmdbId, 'tv', season, episode);
+            if (result?.success && result.hlsUrl) {
+                return { ...result, source: 'vidsrc-scraper' };
+            }
+        } catch (e) {
+            console.warn('vidsrc-scraper tv failed:', e.message);
+        }
+    }
+    try {
+        const fallback = await manualVidSrcExtract(tmdbId, 'tv', season, episode);
+        if (fallback.success) return fallback;
+    } catch (e) {
+        console.warn('Manual TV fallback failed:', e.message);
+    }
+    return { success: false, error: 'All extraction sources failed' };
+}
+
+// ============================================================
 // ROOT
 // ============================================================
 app.get('/', (req, res) => res.json({
     name:          'YOUFLEX API',
-    version:       '2.3.0',
+    version:       '2.4.0',
     status:        'running',
     embedSources:  EMBED_SOURCES.map(s => s.label),
     ytdlActive:    !!ytdl,
@@ -526,17 +617,26 @@ app.get('/api/embed/sources/:type/:tmdbId', (req, res) => {
 app.get('/api/stream/extract/movie/:tmdbId',
     cacheMW(C.streamExtract, r => `extract:movie:${r.params.tmdbId}`),
     async (req, res) => {
-        if (!scrapeVidsrc)
-            return res.status(501).json({ success: false, error: 'vidsrc-scraper not installed' });
-
         const { tmdbId } = req.params;
         if (!/^\d+$/.test(tmdbId))
             return res.status(400).json({ success: false, error: 'Invalid TMDB ID' });
 
+        // Check release date
         try {
-            const result = await scrapeVidsrc(tmdbId, 'movie');
-            if (!result || !result.success)
-                return res.status(404).json({ success: false, error: 'No stream found', data: null });
+            const details = await tmdbFetch(`/movie/${tmdbId}`);
+            const releaseDate = details.release_date;
+            if (releaseDate && new Date(releaseDate) > new Date()) {
+                return res.status(404).json({
+                    success: false,
+                    error: `This movie releases on ${releaseDate} — no stream available yet`,
+                });
+            }
+        } catch (_) { /* continue anyway */ }
+
+        try {
+            const result = await tryExtractMovie(tmdbId);
+            if (!result.success)
+                return res.status(404).json({ success: false, error: result.error || 'No stream found', data: null });
 
             res.json({
                 success: true,
@@ -545,6 +645,7 @@ app.get('/api/stream/extract/movie/:tmdbId',
                     type: 'movie',
                     hlsUrl:    result.hlsUrl,
                     subtitles: result.subtitles || [],
+                    source:    result.source || 'unknown',
                     note:      'HLS stream URL — use an HLS-capable player or downloader',
                     expiresIn: 600,
                 },
@@ -562,18 +663,15 @@ app.get('/api/stream/extract/movie/:tmdbId',
 app.get('/api/stream/extract/tv/:tmdbId/:season/:episode',
     cacheMW(C.streamExtract, r => `extract:tv:${r.params.tmdbId}:${r.params.season}:${r.params.episode}`),
     async (req, res) => {
-        if (!scrapeVidsrc)
-            return res.status(501).json({ success: false, error: 'vidsrc-scraper not installed' });
-
         const { tmdbId, season, episode } = req.params;
         const s = parseInt(season), e = parseInt(episode);
         if (!/^\d+$/.test(tmdbId) || isNaN(s) || isNaN(e) || s < 1 || e < 1)
             return res.status(400).json({ success: false, error: 'Invalid parameters' });
 
         try {
-            const result = await scrapeVidsrc(tmdbId, 'tv', season, episode);
-            if (!result || !result.success)
-                return res.status(404).json({ success: false, error: 'No stream found', data: null });
+            const result = await tryExtractTV(tmdbId, season, episode);
+            if (!result.success)
+                return res.status(404).json({ success: false, error: result.error || 'No stream found', data: null });
 
             res.json({
                 success: true,
@@ -581,6 +679,7 @@ app.get('/api/stream/extract/tv/:tmdbId/:season/:episode',
                     tmdbId, season: s, episode: e, type: 'tv',
                     hlsUrl:    result.hlsUrl,
                     subtitles: result.subtitles || [],
+                    source:    result.source || 'unknown',
                     note:      'HLS stream URL — use an HLS-capable player or downloader',
                     expiresIn: 600,
                 },
@@ -1160,13 +1259,13 @@ app.use((err, req, res, next) => {
 });
 
 // ============================================================
-// START — async so we can load ESM scraper first
+// START
 // ============================================================
 (async () => {
     await initVidsrcScraper();
 
     app.listen(PORT, '0.0.0.0', () => {
-        console.log(`\n🚀 YOUFLEX Backend v2.3 running on port ${PORT}`);
+        console.log(`\n🚀 YOUFLEX Backend v2.4 running on port ${PORT}`);
         console.log(`🎬 Embed sources: ${EMBED_SOURCES.map(s => s.label).join(', ')}`);
         console.log(`📺 TV:      GET /api/embed/tv/:tmdbId/:season/:episode`);
         console.log(`🎥 Movie:   GET /api/embed/movie/:tmdbId`);
