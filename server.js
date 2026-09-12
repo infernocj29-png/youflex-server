@@ -1018,26 +1018,21 @@ app.get('/api/recommendations/enhanced/:type/:id',
 );
 
 // ============================================================
-// YOUFLEX DOWNLOAD MODULE
-// Add this entire block to your server.js
-// Place it BEFORE the 404 handler at the bottom
+// YOUFLEX DOWNLOAD MODULE — Puppeteer + yt-dlp
 // ============================================================
 
 const { spawn, execSync } = require('child_process');
 const path  = require('path');
-const fs    = require('fs');
 const os    = require('os');
 
 // ── yt-dlp binary detection ──────────────────────────────────
-// On Render, yt-dlp is installed via the build command (see README).
-// Locally, install with: pip install yt-dlp  OR  brew install yt-dlp
 function getYtDlpPath() {
     const candidates = [
+        '/opt/render/project/src/bin/yt-dlp',
+        path.join(__dirname, 'bin/yt-dlp'),
         '/usr/local/bin/yt-dlp',
         '/usr/bin/yt-dlp',
-        path.join(os.homedir(), '.local/bin/yt-dlp'),
-        path.join(__dirname, 'bin/yt-dlp'),
-        'yt-dlp', // PATH fallback
+        'yt-dlp',
     ];
     for (const p of candidates) {
         try {
@@ -1053,13 +1048,11 @@ try {
     YT_DLP_PATH = getYtDlpPath();
     console.log(YT_DLP_PATH
         ? `✅ yt-dlp found at: ${YT_DLP_PATH}`
-        : '⚠️  yt-dlp not found — movie/TV download disabled');
+        : '⚠️  yt-dlp not found');
 } catch (_) {}
 
-// ── Active download tracker (for cancellation) ───────────────
 const activeDownloads = new Map();
 
-// ── Sanitise filename ─────────────────────────────────────────
 function safeFilename(str) {
     return (str || 'video')
         .replace(/[^\w\s\-().]/g, '')
@@ -1067,299 +1060,68 @@ function safeFilename(str) {
         .slice(0, 80);
 }
 
-// ── Build VidSrc URL ──────────────────────────────────────────
-function buildVidSrcUrl(type, tmdbId, season, episode) {
-    if (type === 'tv') {
-        return `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${season}&episode=${episode}`;
-    }
-    return `https://vidsrc.me/embed/movie?tmdb=${tmdbId}`;
-}
-
-// ── Alternate source list (tried in order if primary fails) ───
-function buildSourceUrls(type, tmdbId, season, episode) {
-    if (type === 'tv') {
-        const s = season || 1, e = episode || 1;
-        return [
-            `https://vidsrc.to/embed/tv/${tmdbId}/${s}/${e}`,
-            `https://vidsrc.xyz/embed/tv?tmdb=${tmdbId}&season=${s}&episode=${e}`,
-            `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1&s=${s}&e=${e}`,
-        ];
-    }
-    return [
-        `https://vidsrc.to/embed/movie/${tmdbId}`,
-        `https://vidsrc.xyz/embed/movie?tmdb=${tmdbId}`,
-        `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1`,
-    ];
-}
-
-// ── yt-dlp args builder ───────────────────────────────────────
-function buildYtDlpArgs(sourceUrl, quality = 'best') {
-    const formatSelector = quality === 'best'
-        ? 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best'
-        : `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${quality}]/best`;
-
-    return [
-        '--no-playlist',
-        '--format', formatSelector,
-        '--output', '-',
-        '--no-part',
-        '--no-mtime',
-        '--quiet',
-        '--no-warnings',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        '--referer', sourceUrl,
-        '--add-header', `Referer:${sourceUrl}`,
-        '--socket-timeout', '30',
-        '--retries', '5',
-        '--fragment-retries', '10',
-        '--extractor-retries', '5',
-        '--geo-bypass',
-        '--allow-unplayable-formats',
-        '--ignore-errors',
-        sourceUrl,
-    ];
-}
-
-// ============================================================
-// GET /api/download/info/:type/:tmdbId
-// Returns available quality options before committing to download
-// ============================================================
-app.get('/api/download/info/:type/:tmdbId', async (req, res) => {
-    const { type, tmdbId } = req.params;
-    const { season = 1, episode = 1 } = req.query;
-
-    if (!['movie', 'tv'].includes(type))
-        return res.json({ success: false, error: 'type must be movie or tv' });
-    if (!YT_DLP_PATH)
-        return res.json({ success: false, error: 'yt-dlp not available on this server.' });
-
-    const sourceUrl = buildVidSrcUrl(type, tmdbId, parseInt(season), parseInt(episode));
-
+// ── Extract real stream URL using Puppeteer ───────────────────
+async function extractStreamUrl(embedUrl) {
+    let browser = null;
     try {
-        // Run yt-dlp --dump-json to get format list without downloading
-        const result = await new Promise((resolve, reject) => {
-            const proc = spawn(YT_DLP_PATH, [
-                '--dump-json',
-                '--no-playlist',
-                '--quiet',
-                '--no-warnings',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                '--add-header', 'Referer:https://vidsrc.me/',
-                '--socket-timeout', '20',
-                '--geo-bypass',
-                sourceUrl,
-            ], { timeout: 30000 });
-
-            let stdout = '', stderr = '';
-            proc.stdout.on('data', d => stdout += d);
-            proc.stderr.on('data', d => stderr += d);
-            proc.on('close', code => {
-                if (code !== 0) return reject(new Error(stderr || `yt-dlp exited ${code}`));
-                try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
-            });
-            proc.on('error', reject);
+        const puppeteer = require('puppeteer');
+        browser = await puppeteer.launch({
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+            ],
         });
 
-        // Extract unique height options
-        const formats = (result.formats || [])
-            .filter(f => f.height && f.vcodec !== 'none')
-            .map(f => ({ quality: f.height, ext: f.ext, filesize: f.filesize }));
+        const page = await browser.newPage();
+        let streamUrl = null;
 
-        const heights = [...new Set(formats.map(f => f.quality))].sort((a, b) => b - a);
-
-        res.json({
-            success: true,
-            data: {
-                title:     result.title,
-                duration:  result.duration,
-                thumbnail: result.thumbnail,
-                qualities: heights.length ? heights.map(h => ({
-                    label:    `${h}p`,
-                    value:    h,
-                    filesize: formats.find(f => f.quality === h)?.filesize || null,
-                })) : [{ label: 'Best Available', value: 'best' }],
-                sourceUrl,
-            },
-        });
-    } catch (err) {
-        res.json({ success: false, error: `Could not fetch stream info: ${err.message}` });
-    }
-});
-
-// ============================================================
-// GET /api/download/:type/:tmdbId
-// Streams the video file directly to the browser for download
-// ============================================================
-app.get('/api/download/:type/:tmdbId', async (req, res) => {
-    const { type, tmdbId } = req.params;
-    const {
-        season   = 1,
-        episode  = 1,
-        quality  = 'best',
-        title    = 'video',
-        source   = '0',
-    } = req.query;
-
-    if (!['movie', 'tv'].includes(type))
-        return res.status(400).json({ success: false, error: 'type must be movie or tv' });
-    if (!tmdbId || !/^\d+$/.test(tmdbId))
-        return res.status(400).json({ success: false, error: 'Invalid TMDB ID' });
-    if (!YT_DLP_PATH)
-        return res.status(503).json({ success: false, error: 'yt-dlp not available on this server.' });
-
-    const sources    = buildSourceUrls(type, tmdbId, parseInt(season), parseInt(episode));
-    const sourceIdx  = Math.min(parseInt(source) || 0, sources.length - 1);
-    const sourceUrl  = sources[sourceIdx];
-    const filename   = safeFilename(
-        type === 'tv'
-            ? `${title}_S${season}E${episode}`
-            : title
-    ) + '.mp4';
-
-    const downloadId = `${tmdbId}-${type}-${Date.now()}`;
-
-    console.log(`⬇️  Download started [${downloadId}]: ${filename} from ${sourceUrl}`);
-
-    // Set streaming headers
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Transfer-Encoding', 'chunked');
-    res.setHeader('X-Download-Id', downloadId);
-
-    const args = buildYtDlpArgs(sourceUrl, quality === 'best' ? 'best' : parseInt(quality));
-    const proc = spawn(YT_DLP_PATH, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    activeDownloads.set(downloadId, proc);
-
-    let stderrBuf = '';
-    proc.stderr.on('data', d => {
-        stderrBuf += d.toString();
-        // Log progress lines (yt-dlp outputs % progress to stderr)
-        const line = d.toString().trim();
-        if (line) console.log(`[yt-dlp ${downloadId}] ${line}`);
-    });
-
-    proc.stdout.pipe(res);
-
-    proc.on('close', (code) => {
-        activeDownloads.delete(downloadId);
-        if (code !== 0) {
-            console.error(`❌ yt-dlp [${downloadId}] exited ${code}: ${stderrBuf.slice(-300)}`);
-        } else {
-            console.log(`✅ Download complete [${downloadId}]`);
-        }
-        if (!res.writableEnded) res.end();
-    });
-
-    proc.on('error', (err) => {
-        activeDownloads.delete(downloadId);
-        console.error(`❌ yt-dlp spawn error [${downloadId}]:`, err.message);
-        if (!res.headersSent) {
-            res.status(500).json({ success: false, error: err.message });
-        } else {
-            res.end();
-        }
-    });
-
-    // If client disconnects, kill the process to free resources
-    req.on('close', () => {
-        if (activeDownloads.has(downloadId)) {
-            console.log(`🔌 Client disconnected — killing download [${downloadId}]`);
-            proc.kill('SIGTERM');
-            activeDownloads.delete(downloadId);
-        }
-    });
-});
-
-// ============================================================
-// DELETE /api/download/cancel/:downloadId
-// Cancel an in-progress download
-// ============================================================
-app.delete('/api/download/cancel/:downloadId', (req, res) => {
-    const { downloadId } = req.params;
-    const proc = activeDownloads.get(downloadId);
-    if (proc) {
-        proc.kill('SIGTERM');
-        activeDownloads.delete(downloadId);
-        res.json({ success: true, message: 'Download cancelled' });
-    } else {
-        res.json({ success: false, error: 'Download not found or already complete' });
-    }
-});
-
-// ============================================================
-// GET /api/download/trailer/:videoId
-// Download a YouTube trailer via ytdl-core (already installed)
-// ============================================================
-app.get('/api/download/trailer/:videoId', async (req, res) => {
-    if (!ytdl) {
-        return res.status(503).json({
-            success: false,
-            error: 'ytdl-core not installed. Run: npm install @distube/ytdl-core'
-        });
-    }
-
-    const { videoId } = req.params;
-    const { title = 'trailer' } = req.query;
-
-    if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId))
-        return res.status(400).json({ success: false, error: 'Invalid YouTube video ID' });
-
-    const filename = safeFilename(title) + '_trailer.mp4';
-    const ytUrl    = `https://www.youtube.com/watch?v=${videoId}`;
-
-    console.log(`⬇️  Trailer download: ${filename} (${videoId})`);
-
-    try {
-        const info   = await ytdl.getInfo(ytUrl);
-        const format = ytdl.chooseFormat(info.formats, {
-            quality: 'highestvideo',
-            filter:  f => f.container === 'mp4' && f.hasAudio,
-        }) || ytdl.chooseFormat(info.formats, {
-            quality: 'highest',
-            filter:  'audioandvideo',
+        // Intercept network requests to find the real video stream
+        await page.setRequestInterception(true);
+        page.on('request', req => {
+            const url = req.url();
+            // Look for m3u8 or mp4 stream URLs
+            if (
+                (url.includes('.m3u8') || url.includes('.mp4')) &&
+                !url.includes('thumbnail') &&
+                !url.includes('poster')
+            ) {
+                if (!streamUrl) {
+                    streamUrl = url;
+                    console.log(`🎯 Found stream URL: ${url.slice(0, 80)}...`);
+                }
+            }
+            req.continue();
         });
 
-        if (!format) {
-            return res.status(404).json({ success: false, error: 'No downloadable format found' });
-        }
+        await page.setUserAgent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+        );
 
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        if (format.contentLength) {
-            res.setHeader('Content-Length', format.contentLength);
-        }
-
-        const stream = ytdl(ytUrl, { format });
-
-        stream.on('error', err => {
-            console.error('ytdl stream error:', err.message);
-            if (!res.headersSent) res.status(500).end();
-            else res.end();
+        await page.goto(embedUrl, {
+            waitUntil: 'networkidle2',
+            timeout: 30000,
         });
 
-        stream.on('end', () => console.log(`✅ Trailer download complete: ${filename}`));
+        // Wait a bit for lazy-loaded streams
+        await new Promise(r => setTimeout(r, 5000));
 
-        stream.pipe(res);
-
-        req.on('close', () => {
-            stream.destroy();
-        });
+        await browser.close();
+        return streamUrl;
 
     } catch (err) {
-        console.error('Trailer download error:', err.message);
-        if (!res.headersSent) {
-            res.status(500).json({ success: false, error: err.message });
-        }
+        if (browser) await browser.close().catch(() => {});
+        console.error('Puppeteer error:', err.message);
+        return null;
     }
-});
+}
 
-// ============================================================
-// GET /api/download/status
-// Server capability check — what download features are available
-// ============================================================
+// ── Download status ───────────────────────────────────────────
 app.get('/api/download/status', (req, res) => {
     res.json({
         success: true,
@@ -1375,6 +1137,199 @@ app.get('/api/download/status', (req, res) => {
             },
         },
     });
+});
+
+// ── Trailer download ──────────────────────────────────────────
+app.get('/api/download/trailer/:videoId', async (req, res) => {
+    if (!ytdl) {
+        return res.status(503).json({
+            success: false,
+            error: 'ytdl-core not installed.'
+        });
+    }
+
+    const { videoId } = req.params;
+    const { title = 'trailer' } = req.query;
+
+    if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId))
+        return res.status(400).json({ success: false, error: 'Invalid YouTube video ID' });
+
+    const filename = safeFilename(title) + '_trailer.mp4';
+    const ytUrl    = `https://www.youtube.com/watch?v=${videoId}`;
+
+    console.log(`⬇️  Trailer download: ${filename}`);
+
+    try {
+        const info   = await ytdl.getInfo(ytUrl);
+        const format = ytdl.chooseFormat(info.formats, {
+            quality: 'highestvideo',
+            filter:  f => f.container === 'mp4' && f.hasAudio,
+        }) || ytdl.chooseFormat(info.formats, {
+            quality: 'highest',
+            filter:  'audioandvideo',
+        });
+
+        if (!format)
+            return res.status(404).json({ success: false, error: 'No format found' });
+
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        if (format.contentLength)
+            res.setHeader('Content-Length', format.contentLength);
+
+        const stream = ytdl(ytUrl, { format });
+        stream.on('error', err => {
+            if (!res.headersSent) res.status(500).end();
+            else res.end();
+        });
+        stream.pipe(res);
+        req.on('close', () => stream.destroy());
+
+    } catch (err) {
+        if (!res.headersSent)
+            res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Movie / TV download using Puppeteer + yt-dlp ─────────────
+app.get('/api/download/:type/:tmdbId', async (req, res) => {
+    const { type, tmdbId } = req.params;
+
+    // Prevent 'trailer' being caught by this route
+    if (type === 'trailer') {
+        return res.status(404).json({ success: false, error: 'Use /api/download/trailer/:videoId' });
+    }
+
+    const {
+        season  = 1,
+        episode = 1,
+        quality = 'best',
+        title   = 'video',
+    } = req.query;
+
+    if (!['movie', 'tv'].includes(type))
+        return res.status(400).json({ success: false, error: 'type must be movie or tv' });
+    if (!tmdbId || !/^\d+$/.test(tmdbId))
+        return res.status(400).json({ success: false, error: 'Invalid TMDB ID' });
+    if (!YT_DLP_PATH)
+        return res.status(503).json({ success: false, error: 'yt-dlp not available.' });
+
+    // Build embed URL
+    const embedUrl = type === 'tv'
+        ? `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}`
+        : `https://vidsrc.to/embed/movie/${tmdbId}`;
+
+    const filename = safeFilename(
+        type === 'tv' ? `${title}_S${season}E${episode}` : title
+    ) + '.mp4';
+
+    const downloadId = `${tmdbId}-${type}-${Date.now()}`;
+    console.log(`⬇️  Starting download [${downloadId}]: ${filename}`);
+    console.log(`🔍 Extracting stream from: ${embedUrl}`);
+
+    // Step 1: Use Puppeteer to get real stream URL
+    let streamUrl = await extractStreamUrl(embedUrl);
+
+    if (!streamUrl) {
+        // Try fallback embed sources
+        const fallbacks = type === 'tv'
+            ? [
+                `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${season}&episode=${episode}`,
+                `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1&s=${season}&e=${episode}`,
+            ]
+            : [
+                `https://vidsrc.me/embed/movie?tmdb=${tmdbId}`,
+                `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1`,
+            ];
+
+        for (const fb of fallbacks) {
+            console.log(`🔄 Trying fallback: ${fb}`);
+            streamUrl = await extractStreamUrl(fb);
+            if (streamUrl) break;
+        }
+    }
+
+    if (!streamUrl) {
+        return res.status(503).json({
+            success: false,
+            error: 'Could not extract stream URL. The source may be protected.'
+        });
+    }
+
+    console.log(`✅ Stream URL found, starting yt-dlp download...`);
+
+    // Step 2: Pass real stream URL to yt-dlp
+    const formatSelector = quality === 'best'
+        ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+        : `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${quality}]/best`;
+
+    const args = [
+        '--no-playlist',
+        '--format', formatSelector,
+        '--output', '-',
+        '--no-part',
+        '--quiet',
+        '--no-warnings',
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        '--socket-timeout', '30',
+        '--retries', '3',
+        streamUrl,
+    ];
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('X-Download-Id', downloadId);
+
+    const proc = spawn(YT_DLP_PATH, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    activeDownloads.set(downloadId, proc);
+
+    proc.stderr.on('data', d => {
+        const line = d.toString().trim();
+        if (line) console.log(`[yt-dlp ${downloadId}] ${line}`);
+    });
+
+    proc.stdout.pipe(res);
+
+    proc.on('close', code => {
+        activeDownloads.delete(downloadId);
+        if (code !== 0) {
+            console.error(`❌ yt-dlp failed [${downloadId}] code: ${code}`);
+        } else {
+            console.log(`✅ Download complete [${downloadId}]`);
+        }
+        if (!res.writableEnded) res.end();
+    });
+
+    proc.on('error', err => {
+        activeDownloads.delete(downloadId);
+        if (!res.headersSent)
+            res.status(500).json({ success: false, error: err.message });
+        else res.end();
+    });
+
+    req.on('close', () => {
+        if (activeDownloads.has(downloadId)) {
+            proc.kill('SIGTERM');
+            activeDownloads.delete(downloadId);
+        }
+    });
+});
+
+// ── Cancel download ───────────────────────────────────────────
+app.delete('/api/download/cancel/:downloadId', (req, res) => {
+    const { downloadId } = req.params;
+    const proc = activeDownloads.get(downloadId);
+    if (proc) {
+        proc.kill('SIGTERM');
+        activeDownloads.delete(downloadId);
+        res.json({ success: true, message: 'Download cancelled' });
+    } else {
+        res.json({ success: false, error: 'Download not found' });
+    }
 });
 
 // ============================================================
