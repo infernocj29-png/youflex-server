@@ -1018,135 +1018,212 @@ app.get('/api/recommendations/enhanced/:type/:id',
 );
 
 // ============================================================
-// YOUFLEX DOWNLOAD MODULE — Puppeteer + yt-dlp
+// YOUFLEX DOWNLOAD MODULE — WebTorrent approach
 // ============================================================
+const WebTorrent = require('webtorrent');
+const { execSync } = require('child_process');
+const path = require('path');
+const os = require('os');
 
-const { spawn, execSync } = require('child_process');
-const path  = require('path');
-const os    = require('os');
-
-// ── yt-dlp binary detection ──────────────────────────────────
-function getYtDlpPath() {
-    const candidates = [
-        '/opt/render/project/src/bin/yt-dlp',
-        path.join(__dirname, 'bin/yt-dlp'),
-        '/usr/local/bin/yt-dlp',
-        '/usr/bin/yt-dlp',
-        'yt-dlp',
-    ];
-    for (const p of candidates) {
-        try {
-            execSync(`${p} --version`, { stdio: 'pipe', timeout: 5000 });
-            return p;
-        } catch (_) {}
+// ── Single WebTorrent client instance ────────────────────────
+let wtClient = null;
+function getWtClient() {
+    if (!wtClient) {
+        wtClient = new WebTorrent();
+        wtClient.on('error', err => console.error('WebTorrent error:', err.message));
     }
-    return null;
+    return wtClient;
 }
 
-let YT_DLP_PATH = null;
-try {
-    YT_DLP_PATH = getYtDlpPath();
-    console.log(YT_DLP_PATH
-        ? `✅ yt-dlp found at: ${YT_DLP_PATH}`
-        : '⚠️  yt-dlp not found');
-} catch (_) {}
-
-const activeDownloads = new Map();
-
-function safeFilename(str) {
-    return (str || 'video')
-        .replace(/[^\w\s\-().]/g, '')
-        .replace(/\s+/g, '_')
-        .slice(0, 80);
-}
-
-// ── Extract real stream URL using Puppeteer ───────────────────
-async function extractStreamUrl(embedUrl) {
-    let browser = null;
+// ── Search YIFY for movies ────────────────────────────────────
+async function searchYIFY(tmdbId, quality = '720p') {
     try {
-        const puppeteer = require('puppeteer');
-        browser = await puppeteer.launch({
-            headless: 'new',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-            ],
-        });
+        // Get movie details from TMDB first
+        const details = await tmdbFetch(`/movie/${tmdbId}`);
+        const title = details.title;
+        const year = details.release_date?.split('-')[0];
 
-        const page = await browser.newPage();
-        let streamUrl = null;
+        if (!title) return null;
 
-        // Intercept network requests to find the real video stream
-        await page.setRequestInterception(true);
-        page.on('request', req => {
-            const url = req.url();
-            // Look for m3u8 or mp4 stream URLs
-            if (
-                (url.includes('.m3u8') || url.includes('.mp4')) &&
-                !url.includes('thumbnail') &&
-                !url.includes('poster')
-            ) {
-                if (!streamUrl) {
-                    streamUrl = url;
-                    console.log(`🎯 Found stream URL: ${url.slice(0, 80)}...`);
-                }
-            }
-            req.continue();
-        });
+        console.log(`🔍 Searching YIFY for: ${title} (${year})`);
 
-        await page.setUserAgent(
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
-        );
+        const searchUrl = `https://yts.mx/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&quality=${quality}&limit=5`;
+        const res = await axios.get(searchUrl, { timeout: 10000 });
+        const movies = res.data?.data?.movies || [];
 
-        await page.goto(embedUrl, {
-            waitUntil: 'networkidle2',
-            timeout: 30000,
-        });
+        // Find best match by year
+        const match = movies.find(m => 
+            m.year == year || 
+            m.title.toLowerCase().includes(title.toLowerCase())
+        ) || movies[0];
 
-        // Wait a bit for lazy-loaded streams
-        await new Promise(r => setTimeout(r, 5000));
+        if (!match) return null;
 
-        await browser.close();
-        return streamUrl;
+        // Get preferred quality torrent
+        const torrents = match.torrents || [];
+        const torrent = torrents.find(t => t.quality === quality)
+            || torrents.find(t => t.quality === '720p')
+            || torrents[0];
 
+        if (!torrent) return null;
+
+        console.log(`✅ Found: ${match.title} (${match.year}) — ${torrent.quality}`);
+        return {
+            title: match.title,
+            year: match.year,
+            quality: torrent.quality,
+            magnet: `magnet:?xt=urn:btih:${torrent.hash}&dn=${encodeURIComponent(match.title)}&tr=udp://open.demonii.com:1337/announce&tr=udp://tracker.openbittorrent.com:80&tr=udp://tracker.coppersurfer.tk:6969&tr=udp://glotorrents.pw:6969/announce&tr=udp://tracker.opentrackr.org:1337/announce&tr=udp://torrent.gresille.org:80/announce&tr=udp://p4p.arenabg.com:1337&tr=udp://tracker.leechers-paradise.org:6969`,
+            size: torrent.size,
+            seeds: torrent.seeds,
+        };
     } catch (err) {
-        if (browser) await browser.close().catch(() => {});
-        console.error('Puppeteer error:', err.message);
+        console.error('YIFY search error:', err.message);
         return null;
     }
 }
 
-// ── Download status ───────────────────────────────────────────
+// ── Search EZTV for TV shows ──────────────────────────────────
+async function searchEZTV(tmdbId, season, episode) {
+    try {
+        const details = await tmdbFetch(`/tv/${tmdbId}`);
+        const title = details.name;
+        const imdbId = details.external_ids?.imdb_id;
+
+        if (!title) return null;
+
+        const s = String(season).padStart(2, '0');
+        const e = String(episode).padStart(2, '0');
+
+        console.log(`🔍 Searching EZTV for: ${title} S${s}E${e}`);
+
+        // Try EZTV API
+        let searchUrl = imdbId
+            ? `https://eztv.re/api/get-torrents?imdb_id=${imdbId.replace('tt','')}&limit=10`
+            : `https://eztv.re/api/get-torrents?limit=10`;
+
+        const res = await axios.get(searchUrl, { timeout: 10000 });
+        const torrents = res.data?.torrents || [];
+
+        // Filter for specific episode
+        const epMatch = torrents.filter(t => {
+            const tn = t.title?.toLowerCase() || '';
+            return tn.includes(`s${s}e${e}`) || tn.includes(`${season}x${e}`);
+        });
+
+        const torrent = epMatch.find(t => t.title?.includes('720p'))
+            || epMatch.find(t => t.title?.includes('1080p'))
+            || epMatch[0];
+
+        if (!torrent) {
+            // Fallback: search by title
+            const fallbackUrl = `https://eztv.re/api/get-torrents?limit=10`;
+            return null;
+        }
+
+        console.log(`✅ Found: ${torrent.title}`);
+        return {
+            title: torrent.title,
+            magnet: torrent.magnet_url,
+            size: torrent.size_bytes,
+            seeds: torrent.seeds,
+        };
+    } catch (err) {
+        console.error('EZTV search error:', err.message);
+        return null;
+    }
+}
+
+// ── Stream torrent to browser ─────────────────────────────────
+function streamTorrent(magnetUrl, filename, res, req) {
+    return new Promise((resolve, reject) => {
+        const client = getWtClient();
+        const downloadId = Date.now().toString();
+
+        console.log(`🧲 Adding torrent: ${magnetUrl.slice(0, 60)}...`);
+
+        const timeout = setTimeout(() => {
+            reject(new Error('Torrent timeout — no peers found'));
+        }, 60000); // 60 second timeout
+
+        client.add(magnetUrl, { path: os.tmpdir() }, torrent => {
+            clearTimeout(timeout);
+
+            // Find the largest video file
+            const file = torrent.files.reduce((a, b) =>
+                a.size > b.size ? a : b
+            );
+
+            console.log(`📦 Streaming: ${file.name} (${(file.length / 1024 / 1024).toFixed(0)}MB)`);
+
+            res.setHeader('Content-Type', 'video/mp4');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.setHeader('Content-Length', file.length);
+            res.setHeader('Accept-Ranges', 'bytes');
+
+            const stream = file.createReadStream();
+
+            stream.on('error', err => {
+                console.error('Stream error:', err.message);
+                torrent.destroy();
+                reject(err);
+            });
+
+            stream.pipe(res);
+
+            res.on('close', () => {
+                console.log(`🔌 Client disconnected — destroying torrent`);
+                torrent.destroy();
+                resolve();
+            });
+
+            res.on('finish', () => {
+                console.log(`✅ Torrent stream complete`);
+                torrent.destroy();
+                resolve();
+            });
+
+            // Log download progress
+            const progressInterval = setInterval(() => {
+                const progress = (torrent.progress * 100).toFixed(1);
+                const speed = (torrent.downloadSpeed / 1024).toFixed(0);
+                console.log(`📥 Progress: ${progress}% — ${speed} KB/s — Peers: ${torrent.numPeers}`);
+                if (torrent.done) clearInterval(progressInterval);
+            }, 5000);
+        });
+
+        client.on('error', err => {
+            clearTimeout(timeout);
+            reject(err);
+        });
+    });
+}
+
+// ============================================================
+// GET /api/download/status
+// ============================================================
 app.get('/api/download/status', (req, res) => {
     res.json({
         success: true,
         data: {
             ytdlCore:   !!ytdl,
-            ytDlp:      !!YT_DLP_PATH,
-            ytDlpPath:  YT_DLP_PATH || null,
-            activeJobs: activeDownloads.size,
+            ytDlp:      true,
+            webTorrent: true,
+            activeJobs: wtClient ? wtClient.torrents.length : 0,
             features: {
                 trailerDownload: !!ytdl,
-                movieDownload:   !!YT_DLP_PATH,
-                tvDownload:      !!YT_DLP_PATH,
+                movieDownload:   true,
+                tvDownload:      true,
             },
         },
     });
 });
 
-// ── Trailer download ──────────────────────────────────────────
+// ============================================================
+// GET /api/download/trailer/:videoId
+// ============================================================
 app.get('/api/download/trailer/:videoId', async (req, res) => {
-    if (!ytdl) {
-        return res.status(503).json({
-            success: false,
-            error: 'ytdl-core not installed.'
-        });
-    }
+    if (!ytdl)
+        return res.status(503).json({ success: false, error: 'ytdl-core not installed.' });
 
     const { videoId } = req.params;
     const { title = 'trailer' } = req.query;
@@ -1154,182 +1231,93 @@ app.get('/api/download/trailer/:videoId', async (req, res) => {
     if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId))
         return res.status(400).json({ success: false, error: 'Invalid YouTube video ID' });
 
-    const filename = safeFilename(title) + '_trailer.mp4';
-    const ytUrl    = `https://www.youtube.com/watch?v=${videoId}`;
+    const filename = (title || 'trailer').replace(/[^\w\s\-]/g, '').replace(/\s+/g, '_').slice(0, 80) + '_trailer.mp4';
+    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    console.log(`⬇️  Trailer download: ${filename}`);
+    console.log(`⬇️  Trailer: ${filename}`);
 
     try {
-        const info   = await ytdl.getInfo(ytUrl);
+        const info = await ytdl.getInfo(ytUrl);
         const format = ytdl.chooseFormat(info.formats, {
             quality: 'highestvideo',
-            filter:  f => f.container === 'mp4' && f.hasAudio,
-        }) || ytdl.chooseFormat(info.formats, {
-            quality: 'highest',
-            filter:  'audioandvideo',
-        });
+            filter: f => f.container === 'mp4' && f.hasAudio,
+        }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
 
         if (!format)
             return res.status(404).json({ success: false, error: 'No format found' });
 
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        if (format.contentLength)
-            res.setHeader('Content-Length', format.contentLength);
+        if (format.contentLength) res.setHeader('Content-Length', format.contentLength);
 
         const stream = ytdl(ytUrl, { format });
-        stream.on('error', err => {
-            if (!res.headersSent) res.status(500).end();
-            else res.end();
-        });
+        stream.on('error', () => { if (!res.headersSent) res.status(500).end(); });
         stream.pipe(res);
         req.on('close', () => stream.destroy());
-
     } catch (err) {
         if (!res.headersSent)
             res.status(500).json({ success: false, error: err.message });
     }
 });
 
-// ── Movie / TV download using Puppeteer + yt-dlp ─────────────
+// ============================================================
+// GET /api/download/:type/:tmdbId
+// ============================================================
 app.get('/api/download/:type/:tmdbId', async (req, res) => {
     const { type, tmdbId } = req.params;
 
-    // Prevent 'trailer' being caught by this route
-    if (type === 'trailer') {
+    if (type === 'trailer')
         return res.status(404).json({ success: false, error: 'Use /api/download/trailer/:videoId' });
-    }
+
+    if (!['movie', 'tv'].includes(type))
+        return res.status(400).json({ success: false, error: 'type must be movie or tv' });
 
     const {
         season  = 1,
         episode = 1,
-        quality = 'best',
+        quality = '720p',
         title   = 'video',
     } = req.query;
 
-    if (!['movie', 'tv'].includes(type))
-        return res.status(400).json({ success: false, error: 'type must be movie or tv' });
-    if (!tmdbId || !/^\d+$/.test(tmdbId))
-        return res.status(400).json({ success: false, error: 'Invalid TMDB ID' });
-    if (!YT_DLP_PATH)
-        return res.status(503).json({ success: false, error: 'yt-dlp not available.' });
+    console.log(`⬇️  Download request: ${type} ${tmdbId} S${season}E${episode}`);
 
-    // Build embed URL
-    const embedUrl = type === 'tv'
-        ? `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}`
-        : `https://vidsrc.to/embed/movie/${tmdbId}`;
+    try {
+        let torrentInfo = null;
 
-    const filename = safeFilename(
-        type === 'tv' ? `${title}_S${season}E${episode}` : title
-    ) + '.mp4';
-
-    const downloadId = `${tmdbId}-${type}-${Date.now()}`;
-    console.log(`⬇️  Starting download [${downloadId}]: ${filename}`);
-    console.log(`🔍 Extracting stream from: ${embedUrl}`);
-
-    // Step 1: Use Puppeteer to get real stream URL
-    let streamUrl = await extractStreamUrl(embedUrl);
-
-    if (!streamUrl) {
-        // Try fallback embed sources
-        const fallbacks = type === 'tv'
-            ? [
-                `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${season}&episode=${episode}`,
-                `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1&s=${season}&e=${episode}`,
-            ]
-            : [
-                `https://vidsrc.me/embed/movie?tmdb=${tmdbId}`,
-                `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1`,
-            ];
-
-        for (const fb of fallbacks) {
-            console.log(`🔄 Trying fallback: ${fb}`);
-            streamUrl = await extractStreamUrl(fb);
-            if (streamUrl) break;
-        }
-    }
-
-    if (!streamUrl) {
-        return res.status(503).json({
-            success: false,
-            error: 'Could not extract stream URL. The source may be protected.'
-        });
-    }
-
-    console.log(`✅ Stream URL found, starting yt-dlp download...`);
-
-    // Step 2: Pass real stream URL to yt-dlp
-    const formatSelector = quality === 'best'
-        ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-        : `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${quality}]/best`;
-
-    const args = [
-        '--no-playlist',
-        '--format', formatSelector,
-        '--output', '-',
-        '--no-part',
-        '--quiet',
-        '--no-warnings',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        '--socket-timeout', '30',
-        '--retries', '3',
-        streamUrl,
-    ];
-
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Transfer-Encoding', 'chunked');
-    res.setHeader('X-Download-Id', downloadId);
-
-    const proc = spawn(YT_DLP_PATH, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    activeDownloads.set(downloadId, proc);
-
-    proc.stderr.on('data', d => {
-        const line = d.toString().trim();
-        if (line) console.log(`[yt-dlp ${downloadId}] ${line}`);
-    });
-
-    proc.stdout.pipe(res);
-
-    proc.on('close', code => {
-        activeDownloads.delete(downloadId);
-        if (code !== 0) {
-            console.error(`❌ yt-dlp failed [${downloadId}] code: ${code}`);
+        if (type === 'movie') {
+            torrentInfo = await searchYIFY(tmdbId, quality === 'best' ? '720p' : quality);
         } else {
-            console.log(`✅ Download complete [${downloadId}]`);
+            torrentInfo = await searchEZTV(tmdbId, parseInt(season), parseInt(episode));
         }
-        if (!res.writableEnded) res.end();
-    });
 
-    proc.on('error', err => {
-        activeDownloads.delete(downloadId);
+        if (!torrentInfo || !torrentInfo.magnet) {
+            return res.status(404).json({
+                success: false,
+                error: `No torrent found for this ${type}. Try a different title.`
+            });
+        }
+
+        const filename = (torrentInfo.title || title)
+            .replace(/[^\w\s\-]/g, '')
+            .replace(/\s+/g, '_')
+            .slice(0, 80) + '.mp4';
+
+        console.log(`🧲 Torrent found: ${torrentInfo.title} — Seeds: ${torrentInfo.seeds}`);
+
+        await streamTorrent(torrentInfo.magnet, filename, res, req);
+
+    } catch (err) {
+        console.error('Download error:', err.message);
         if (!res.headersSent)
             res.status(500).json({ success: false, error: err.message });
-        else res.end();
-    });
-
-    req.on('close', () => {
-        if (activeDownloads.has(downloadId)) {
-            proc.kill('SIGTERM');
-            activeDownloads.delete(downloadId);
-        }
-    });
+    }
 });
 
-// ── Cancel download ───────────────────────────────────────────
+// ============================================================
+// DELETE /api/download/cancel/:downloadId
+// ============================================================
 app.delete('/api/download/cancel/:downloadId', (req, res) => {
-    const { downloadId } = req.params;
-    const proc = activeDownloads.get(downloadId);
-    if (proc) {
-        proc.kill('SIGTERM');
-        activeDownloads.delete(downloadId);
-        res.json({ success: true, message: 'Download cancelled' });
-    } else {
-        res.json({ success: false, error: 'Download not found' });
-    }
+    res.json({ success: true, message: 'Use the browser stop button to cancel downloads.' });
 });
 
 // ============================================================
