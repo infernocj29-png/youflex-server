@@ -1080,43 +1080,42 @@ function buildSourceUrls(type, tmdbId, season, episode) {
     if (type === 'tv') {
         const s = season || 1, e = episode || 1;
         return [
-            `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${s}&episode=${e}`,
             `https://vidsrc.to/embed/tv/${tmdbId}/${s}/${e}`,
+            `https://vidsrc.xyz/embed/tv?tmdb=${tmdbId}&season=${s}&episode=${e}`,
             `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1&s=${s}&e=${e}`,
-            `https://www.2embed.cc/embedtv/${tmdbId}&s=${s}&e=${e}`,
         ];
     }
     return [
-        `https://vidsrc.me/embed/movie?tmdb=${tmdbId}`,
         `https://vidsrc.to/embed/movie/${tmdbId}`,
+        `https://vidsrc.xyz/embed/movie?tmdb=${tmdbId}`,
         `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1`,
-        `https://www.2embed.cc/embed/${tmdbId}`,
     ];
 }
 
 // ── yt-dlp args builder ───────────────────────────────────────
 function buildYtDlpArgs(sourceUrl, quality = 'best') {
-    // Format selection: prefer mp4, cap at 720p to save bandwidth/RAM
     const formatSelector = quality === 'best'
-        ? 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best'
+        ? 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best'
         : `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${quality}]/best`;
 
     return [
         '--no-playlist',
         '--format', formatSelector,
-        '--output', '-',                  // pipe to stdout
+        '--output', '-',
         '--no-part',
         '--no-mtime',
         '--quiet',
         '--no-warnings',
         '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        '--add-header', 'Referer:https://vidsrc.me/',
-        '--add-header', 'Origin:https://vidsrc.me',
+        '--referer', sourceUrl,
+        '--add-header', `Referer:${sourceUrl}`,
         '--socket-timeout', '30',
-        '--retries', '3',
-        '--fragment-retries', '5',
-        '--extractor-retries', '3',
+        '--retries', '5',
+        '--fragment-retries', '10',
+        '--extractor-retries', '5',
         '--geo-bypass',
+        '--allow-unplayable-formats',
+        '--ignore-errors',
         sourceUrl,
     ];
 }
