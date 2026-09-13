@@ -105,7 +105,7 @@ app.get('/api/genres/all', async (req, res) => {
         const [movies, tv] = await Promise.all([tmdbFetch('/genre/movie/list'), tmdbFetch('/genre/tv/list')]);
         const all = {};
         [...(movies.genres||[]), ...(tv.genres||[])].forEach(g => { all[g.id] = g.name; });
-        res.json(all);
+        res.json({ success: true, data: all });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -123,7 +123,7 @@ app.get('/api/trending', async (req, res) => {
     try {
         const { type = 'all', page = 1 } = req.query;
         const data = await tmdbFetch(`/trending/${type}/week`, { page });
-        res.json(data.results || []);
+        res.json({ success: true, data: data.results || [] });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -218,7 +218,7 @@ app.get('/api/details/:type/:id', async (req, res) => {
         const data = await tmdbFetch(`/${req.params.type}/${req.params.id}`, {
             append_to_response: 'credits,videos,similar,recommendations,external_ids,watch/providers',
         });
-        res.json(data); // Return directly — index.html uses item.title, item.overview etc
+        res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -246,7 +246,7 @@ app.get('/api/tv/:id', async (req, res) => {
 app.get('/api/credits/:type/:id', async (req, res) => {
     try {
         const data = await tmdbFetch(`/${req.params.type}/${req.params.id}/credits`);
-        res.json(data); // Return directly — index.html uses data.cast
+        res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -280,7 +280,7 @@ app.get('/api/tv/:id/season/:season', async (req, res) => {
 app.get('/api/similar/:type/:id', async (req, res) => {
     try {
         const data = await tmdbFetch(`/${req.params.type}/${req.params.id}/similar`, { page: req.query.page || 1 });
-        res.json(data); // Return directly — index.html uses data.results
+        res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -303,7 +303,7 @@ app.get('/api/recommendations/enhanced/:type/:id', async (req, res) => {
 app.get('/api/providers/:type/:id', async (req, res) => {
     try {
         const data = await tmdbFetch(`/${req.params.type}/${req.params.id}/watch/providers`);
-        res.json(data); // Return directly — index.html uses data.results
+        res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -367,26 +367,6 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
         const videoId = await getYouTubeTrailer(title, year, type);
         if (videoId) return res.json({ success: true, data: { videoId, title: `${title} Official Trailer`, source: 'youtube' } });
         res.status(404).json({ success: false, error: 'No trailer found' });
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
-// YouTube video stats (views, likes, channel)
-app.get('/api/youtube/video/:videoId', async (req, res) => {
-    try {
-        const { videoId } = req.params;
-        const response = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
-            params: { key: YOUTUBE_API_KEY, id: videoId, part: 'snippet,statistics' },
-            timeout: 10000,
-        });
-        const item = response.data?.items?.[0];
-        if (!item) return res.status(404).json({ success: false, error: 'Video not found' });
-        res.json({ success: true, data: {
-            videoId,
-            title: item.snippet?.title,
-            channelTitle: item.snippet?.channelTitle,
-            viewCount: item.statistics?.viewCount,
-            likeCount: item.statistics?.likeCount,
-        }});
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
