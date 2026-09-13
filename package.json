@@ -1,11 +1,12 @@
 {
   "name": "youflex-backend",
-  "version": "2.0.0",
-  "description": "YOUFLEX backend — TMDB + YouTube proxy API with embed support",
+  "version": "3.0.0",
+  "description": "YOUFLEX backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "build": "mkdir -p bin && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o bin/yt-dlp && chmod +x bin/yt-dlp",
+    "postinstall": "mkdir -p bin && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o bin/yt-dlp && chmod +x bin/yt-dlp"
   },
   "engines": {
     "node": ">=20.0.0"
