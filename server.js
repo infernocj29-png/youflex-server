@@ -1038,28 +1038,39 @@ function getWtClient() {
 // ── Search YIFY for movies ────────────────────────────────────
 async function searchYIFY(tmdbId, quality = '720p') {
     try {
-        // Get movie details from TMDB first
         const details = await tmdbFetch(`/movie/${tmdbId}`);
         const title = details.title;
         const year = details.release_date?.split('-')[0];
-
         if (!title) return null;
 
-        console.log(`🔍 Searching YIFY for: ${title} (${year})`);
+        console.log(`🔍 Searching for: ${title} (${year})`);
 
-        const searchUrl = `https://yts.mx/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&quality=${quality}&limit=5`;
-        const res = await axios.get(searchUrl, { timeout: 10000 });
-        const movies = res.data?.data?.movies || [];
+        // Try multiple APIs
+        const apis = [
+            `https://yts.mx/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&quality=${quality}&limit=5`,
+            `https://yts.lt/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&limit=5`,
+            `https://yts.torrent.ai/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&limit=5`,
+        ];
 
-        // Find best match by year
-        const match = movies.find(m => 
-            m.year == year || 
-            m.title.toLowerCase().includes(title.toLowerCase())
+        let movies = [];
+        for (const url of apis) {
+            try {
+                const res = await axios.get(url, { timeout: 8000 });
+                movies = res.data?.data?.movies || [];
+                if (movies.length) {
+                    console.log(`✅ Found via: ${url}`);
+                    break;
+                }
+            } catch (_) { continue; }
+        }
+
+        if (!movies.length) return null;
+
+        const match = movies.find(m =>
+            String(m.year) === String(year) ||
+            m.title.toLowerCase() === title.toLowerCase()
         ) || movies[0];
 
-        if (!match) return null;
-
-        // Get preferred quality torrent
         const torrents = match.torrents || [];
         const torrent = torrents.find(t => t.quality === quality)
             || torrents.find(t => t.quality === '720p')
@@ -1067,17 +1078,27 @@ async function searchYIFY(tmdbId, quality = '720p') {
 
         if (!torrent) return null;
 
-        console.log(`✅ Found: ${match.title} (${match.year}) — ${torrent.quality}`);
+        const trackers = [
+            'udp://open.demonii.com:1337/announce',
+            'udp://tracker.openbittorrent.com:80',
+            'udp://tracker.coppersurfer.tk:6969',
+            'udp://glotorrents.pw:6969/announce',
+            'udp://tracker.opentrackr.org:1337/announce',
+            'udp://torrent.gresille.org:80/announce',
+            'udp://p4p.arenabg.com:1337',
+            'udp://tracker.leechers-paradise.org:6969',
+        ].map(t => `&tr=${encodeURIComponent(t)}`).join('');
+
         return {
             title: match.title,
             year: match.year,
             quality: torrent.quality,
-            magnet: `magnet:?xt=urn:btih:${torrent.hash}&dn=${encodeURIComponent(match.title)}&tr=udp://open.demonii.com:1337/announce&tr=udp://tracker.openbittorrent.com:80&tr=udp://tracker.coppersurfer.tk:6969&tr=udp://glotorrents.pw:6969/announce&tr=udp://tracker.opentrackr.org:1337/announce&tr=udp://torrent.gresille.org:80/announce&tr=udp://p4p.arenabg.com:1337&tr=udp://tracker.leechers-paradise.org:6969`,
+            magnet: `magnet:?xt=urn:btih:${torrent.hash}&dn=${encodeURIComponent(match.title)}${trackers}`,
             size: torrent.size,
             seeds: torrent.seeds,
         };
     } catch (err) {
-        console.error('YIFY search error:', err.message);
+        console.error('Search error:', err.message);
         return null;
     }
 }
@@ -1222,42 +1243,58 @@ app.get('/api/download/status', (req, res) => {
 // GET /api/download/trailer/:videoId
 // ============================================================
 app.get('/api/download/trailer/:videoId', async (req, res) => {
-    if (!ytdl)
-        return res.status(503).json({ success: false, error: 'ytdl-core not installed.' });
-
     const { videoId } = req.params;
     const { title = 'trailer' } = req.query;
 
     if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId))
         return res.status(400).json({ success: false, error: 'Invalid YouTube video ID' });
 
-    const filename = (title || 'trailer').replace(/[^\w\s\-]/g, '').replace(/\s+/g, '_').slice(0, 80) + '_trailer.mp4';
-    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    if (!YT_DLP_PATH)
+        return res.status(503).json({ success: false, error: 'yt-dlp not available' });
 
+    const filename = (title || 'trailer')
+        .replace(/[^\w\s\-]/g, '')
+        .replace(/\s+/g, '_')
+        .slice(0, 80) + '_trailer.mp4';
+
+    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
     console.log(`⬇️  Trailer: ${filename}`);
 
-    try {
-        const info = await ytdl.getInfo(ytUrl);
-        const format = ytdl.chooseFormat(info.formats, {
-            quality: 'highestvideo',
-            filter: f => f.container === 'mp4' && f.hasAudio,
-        }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Transfer-Encoding', 'chunked');
 
-        if (!format)
-            return res.status(404).json({ success: false, error: 'No format found' });
+    const args = [
+        '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        '--output', '-',
+        '--no-playlist',
+        '--quiet',
+        '--no-warnings',
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        '--add-header', 'Accept-Language:en-US,en;q=0.9',
+        '--extractor-args', 'youtube:player_client=android',
+        '--no-check-certificates',
+        ytUrl,
+    ];
 
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        if (format.contentLength) res.setHeader('Content-Length', format.contentLength);
+    const proc = spawn(YT_DLP_PATH, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
 
-        const stream = ytdl(ytUrl, { format });
-        stream.on('error', () => { if (!res.headersSent) res.status(500).end(); });
-        stream.pipe(res);
-        req.on('close', () => stream.destroy());
-    } catch (err) {
+    proc.stderr.on('data', d => console.log(`[yt-dlp trailer] ${d.toString().trim()}`));
+    proc.stdout.pipe(res);
+
+    proc.on('close', code => {
+        if (code !== 0) console.error(`❌ Trailer yt-dlp failed: code ${code}`);
+        if (!res.writableEnded) res.end();
+    });
+
+    proc.on('error', err => {
         if (!res.headersSent)
             res.status(500).json({ success: false, error: err.message });
-    }
+    });
+
+    req.on('close', () => proc.kill('SIGTERM'));
 });
 
 // ============================================================
