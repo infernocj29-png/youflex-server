@@ -1036,71 +1036,33 @@ function getWtClient() {
 }
 
 // ── Search YIFY for movies ────────────────────────────────────
+const HttpsProxyAgent = require('https-proxy-agent');
+
 async function searchYIFY(tmdbId, quality = '720p') {
-    try {
-        const details = await tmdbFetch(`/movie/${tmdbId}`);
-        const title = details.title;
-        const year = details.release_date?.split('-')[0];
-        if (!title) return null;
+    const details = await tmdbFetch(`/movie/${tmdbId}`);
+    const title = details.title;
+    const year = details.release_date?.split('-')[0];
+    if (!title) return null;
 
-        console.log(`🔍 Searching for: ${title} (${year})`);
+    // Free proxies — replace with working ones
+    const proxies = [
+        'http://103.152.112.162:80',
+        'http://185.162.229.29:80',
+        'http://51.158.68.133:8811',
+    ];
 
-        // Try multiple APIs
-        const apis = [
-            `https://yts.mx/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&quality=${quality}&limit=5`,
-            `https://yts.lt/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&limit=5`,
-            `https://yts.torrent.ai/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&limit=5`,
-        ];
-
-        let movies = [];
-        for (const url of apis) {
-            try {
-                const res = await axios.get(url, { timeout: 8000 });
-                movies = res.data?.data?.movies || [];
-                if (movies.length) {
-                    console.log(`✅ Found via: ${url}`);
-                    break;
-                }
-            } catch (_) { continue; }
-        }
-
-        if (!movies.length) return null;
-
-        const match = movies.find(m =>
-            String(m.year) === String(year) ||
-            m.title.toLowerCase() === title.toLowerCase()
-        ) || movies[0];
-
-        const torrents = match.torrents || [];
-        const torrent = torrents.find(t => t.quality === quality)
-            || torrents.find(t => t.quality === '720p')
-            || torrents[0];
-
-        if (!torrent) return null;
-
-        const trackers = [
-            'udp://open.demonii.com:1337/announce',
-            'udp://tracker.openbittorrent.com:80',
-            'udp://tracker.coppersurfer.tk:6969',
-            'udp://glotorrents.pw:6969/announce',
-            'udp://tracker.opentrackr.org:1337/announce',
-            'udp://torrent.gresille.org:80/announce',
-            'udp://p4p.arenabg.com:1337',
-            'udp://tracker.leechers-paradise.org:6969',
-        ].map(t => `&tr=${encodeURIComponent(t)}`).join('');
-
-        return {
-            title: match.title,
-            year: match.year,
-            quality: torrent.quality,
-            magnet: `magnet:?xt=urn:btih:${torrent.hash}&dn=${encodeURIComponent(match.title)}${trackers}`,
-            size: torrent.size,
-            seeds: torrent.seeds,
-        };
-    } catch (err) {
-        console.error('Search error:', err.message);
-        return null;
+    for (const proxy of proxies) {
+        try {
+            const agent = new HttpsProxyAgent(proxy);
+            const res = await axios.get(
+                `https://yts.mx/api/v2/list_movies.json?query_term=${encodeURIComponent(title)}&limit=5`,
+                { httpsAgent: agent, timeout: 8000 }
+            );
+            const movies = res.data?.data?.movies || [];
+            if (movies.length) return movies[0];
+        } catch (_) { continue; }
     }
+    return null;
 }
 
 // ── Search EZTV for TV shows ──────────────────────────────────
