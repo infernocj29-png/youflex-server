@@ -1,5 +1,5 @@
 // ============================================================
-// YOUFLEX BACKEND v3.1 — Complete Edition
+// YOUFLEX BACKEND v3.2 — Complete Edition
 // ============================================================
 'use strict';
 
@@ -39,21 +39,26 @@ async function tmdbFetch(endpoint, params = {}) {
 // ── YouTube trailer helper ────────────────────────────────────
 async function getYouTubeTrailer(title, year, type) {
     try {
-        const excluded = ['behind the scenes', 'bts', 'clip', 'featurette', 'short', 'bloopers', 'deleted', 'making of', 'interview'];
+        const excluded = ['behind the scenes', 'bts', 'clip', 'featurette', 'short', '#shorts', 'bloopers', 'deleted', 'making of', 'interview', 'reaction', 'review'];
         const res = await axios.get('https://www.googleapis.com/youtube/v3/search', {
             params: {
                 key: YOUTUBE_API_KEY,
-                q: `${title} ${year} official trailer ${type === 'tv' ? 'series' : 'movie'}`,
-                part: 'snippet', type: 'video',
-                videoDefinition: 'high', videoDuration: 'medium',
-                maxResults: 10, relevanceLanguage: 'en',
+                q: `${title} ${year} official trailer ${type === 'tv' ? 'series' : 'movie'} -shorts`,
+                part: 'snippet',
+                type: 'video',
+                videoDefinition: 'high',
+                videoDuration: 'medium',
+                maxResults: 10,
+                relevanceLanguage: 'en',
+                videoEmbeddable: 'true',
             },
             timeout: 10000,
         });
         const items    = res.data?.items || [];
         const trailers = items.filter(i => {
-            const t = (i.snippet?.title || '').toLowerCase();
-            return (t.includes('trailer') || t.includes('teaser')) && !excluded.some(ex => t.includes(ex));
+            const t       = (i.snippet?.title || '').toLowerCase();
+            const isShort = t.includes('#short') || t.includes('short film') || t.includes('| shorts');
+            return (t.includes('trailer') || t.includes('teaser')) && !excluded.some(ex => t.includes(ex)) && !isShort;
         });
         const best = trailers.find(i => i.snippet?.title?.toLowerCase().includes('official')) || trailers[0] || items[0];
         return best ? best.id?.videoId : null;
@@ -90,17 +95,14 @@ function safeFilename(str) { return (str||'video').replace(/[^\w\s\-().]/g,'').r
 // ============================================================
 // HEALTH
 // ============================================================
-app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.1', timestamp: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.2', timestamp: new Date().toISOString() }));
 
 // ============================================================
 // GENRES
 // ============================================================
 app.get('/api/genres/all', async (req, res) => {
     try {
-        const [movies, tv] = await Promise.all([
-            tmdbFetch('/genre/movie/list'),
-            tmdbFetch('/genre/tv/list'),
-        ]);
+        const [movies, tv] = await Promise.all([tmdbFetch('/genre/movie/list'), tmdbFetch('/genre/tv/list')]);
         const all = {};
         [...(movies.genres||[]), ...(tv.genres||[])].forEach(g => { all[g.id] = g.name; });
         res.json(all);
@@ -115,13 +117,13 @@ app.get('/api/genres/:type', async (req, res) => {
 });
 
 // ============================================================
-// TRENDING
+// TRENDING — returns results array directly
 // ============================================================
 app.get('/api/trending', async (req, res) => {
     try {
         const { type = 'all', page = 1 } = req.query;
         const data = await tmdbFetch(`/trending/${type}/week`, { page });
-        res.json({ success: true, data });
+        res.json(data.results || []);
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -133,8 +135,15 @@ app.get('/api/trending/:type', async (req, res) => {
 });
 
 // ============================================================
-// CONTENT (popular, top-rated, upcoming, anime, animation)
+// CONTENT
 // ============================================================
+app.get('/api/content/trending', async (req, res) => {
+    try {
+        const data = await tmdbFetch('/trending/all/week', { page: req.query.page || 1 });
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
 app.get('/api/content/popular', async (req, res) => {
     try {
         const { type = 'movie', page = 1 } = req.query;
@@ -153,26 +162,19 @@ app.get('/api/content/top-rated', async (req, res) => {
 
 app.get('/api/content/upcoming', async (req, res) => {
     try {
-        const { page = 1 } = req.query;
-        const data = await tmdbFetch('/movie/upcoming', { page });
-        res.json({ success: true, data });
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
-app.get('/api/content/trending', async (req, res) => {
-    try {
-        const { page = 1 } = req.query;
-        const data = await tmdbFetch('/trending/all/week', { page });
+        const data = await tmdbFetch('/movie/upcoming', { page: req.query.page || 1 });
         res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.get('/api/content/anime', async (req, res) => {
     try {
-        const { page = 1 } = req.query;
         const data = await tmdbFetch('/discover/tv', {
-            page, with_genres: 16, with_keywords: '210024|287501',
-            sort_by: 'popularity.desc', with_original_language: 'ja',
+            page: req.query.page || 1,
+            with_genres: 16,
+            with_keywords: '210024|287501',
+            sort_by: 'popularity.desc',
+            with_original_language: 'ja',
         });
         res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -180,8 +182,7 @@ app.get('/api/content/anime', async (req, res) => {
 
 app.get('/api/content/animation', async (req, res) => {
     try {
-        const { page = 1 } = req.query;
-        const data = await tmdbFetch('/discover/movie', { page, with_genres: 16, sort_by: 'popularity.desc' });
+        const data = await tmdbFetch('/discover/movie', { page: req.query.page || 1, with_genres: 16, sort_by: 'popularity.desc' });
         res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
@@ -191,11 +192,8 @@ app.get('/api/content/animation', async (req, res) => {
 // ============================================================
 app.get('/api/genre/:genreId', async (req, res) => {
     try {
-        const { genreId } = req.params;
         const { type = 'movie', page = 1, sort = 'popularity.desc' } = req.query;
-        const data = await tmdbFetch(`/discover/${type}`, {
-            page, with_genres: genreId, sort_by: sort,
-        });
+        const data = await tmdbFetch(`/discover/${type}`, { page, with_genres: req.params.genreId, sort_by: sort });
         res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
@@ -205,10 +203,9 @@ app.get('/api/genre/:genreId', async (req, res) => {
 // ============================================================
 app.get('/api/search', async (req, res) => {
     try {
-        const { query, q, page = 1 } = req.query;
-        const searchQuery = query || q;
+        const searchQuery = req.query.query || req.query.q;
         if (!searchQuery) return res.status(400).json({ success: false, error: 'Query required' });
-        const data = await tmdbFetch('/search/multi', { query: searchQuery, page });
+        const data = await tmdbFetch('/search/multi', { query: searchQuery, page: req.query.page || 1 });
         res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
@@ -218,8 +215,7 @@ app.get('/api/search', async (req, res) => {
 // ============================================================
 app.get('/api/details/:type/:id', async (req, res) => {
     try {
-        const { type, id } = req.params;
-        const data = await tmdbFetch(`/${type}/${id}`, {
+        const data = await tmdbFetch(`/${req.params.type}/${req.params.id}`, {
             append_to_response: 'credits,videos,similar,recommendations,external_ids,watch/providers',
         });
         res.json({ success: true, data });
@@ -296,13 +292,13 @@ app.get('/api/recommendations/enhanced/:type/:id', async (req, res) => {
             tmdbFetch(`/${type}/${id}/similar`, { page: 1 }),
         ]);
         const combined = [...(recs.results||[]), ...(similar.results||[])];
-        const unique   = combined.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
-        res.json({ success: true, data: { results: unique.slice(0, 20) } });
+        const unique   = combined.filter((v,i,a) => a.findIndex(t=>t.id===v.id)===i);
+        res.json({ success: true, data: { results: unique.slice(0,20) } });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 // ============================================================
-// PROVIDERS (Where to Watch)
+// PROVIDERS
 // ============================================================
 app.get('/api/providers/:type/:id', async (req, res) => {
     try {
@@ -334,6 +330,23 @@ app.get('/api/discover/:type', async (req, res) => {
 });
 
 // ============================================================
+// POPULAR & TOP RATED (legacy)
+// ============================================================
+app.get('/api/popular/:type', async (req, res) => {
+    try {
+        const data = await tmdbFetch(`/${req.params.type}/popular`, { page: req.query.page||1 });
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/top-rated/:type', async (req, res) => {
+    try {
+        const data = await tmdbFetch(`/${req.params.type}/top_rated`, { page: req.query.page||1 });
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ============================================================
 // YOUTUBE
 // ============================================================
 app.get('/api/trailer/:type/:id', async (req, res) => {
@@ -342,23 +355,17 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
         const details  = await tmdbFetch(`/${type}/${id}`, { append_to_response: 'videos' });
         const videos   = details.videos?.results || [];
         const excluded = ['behind the scenes', 'bts', 'clip', 'featurette', 'short', 'bloopers', 'deleted scenes', 'making of', 'interview'];
-
         const trailers = videos.filter(v => {
             const t = (v.name || '').toLowerCase();
             return v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser') && !excluded.some(ex => t.includes(ex));
         });
-
         const official    = trailers.find(v => v.name?.toLowerCase().includes('official'));
         const tmdbTrailer = official || trailers[0];
-
         if (tmdbTrailer) return res.json({ success: true, data: { videoId: tmdbTrailer.key, title: tmdbTrailer.name, source: 'tmdb' } });
-
         const title   = details.title || details.name;
         const year    = (details.release_date || details.first_air_date || '').split('-')[0];
         const videoId = await getYouTubeTrailer(title, year, type);
-
         if (videoId) return res.json({ success: true, data: { videoId, title: `${title} Official Trailer`, source: 'youtube' } });
-
         res.status(404).json({ success: false, error: 'No trailer found' });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
@@ -418,7 +425,7 @@ async function searchYIFY(tmdbId, quality = '720p') {
             try { const r = await axios.get(url, { timeout: 8000 }); movies = r.data?.data?.movies||[]; if (movies.length) break; } catch (_) {}
         }
         if (!movies.length) return null;
-        const match   = movies.find(m => String(m.year)===String(year) || m.title.toLowerCase()===title.toLowerCase()) || movies[0];
+        const match    = movies.find(m => String(m.year)===String(year) || m.title.toLowerCase()===title.toLowerCase()) || movies[0];
         const torrents = match.torrents || [];
         const torrent  = torrents.find(t => t.quality===quality) || torrents.find(t => t.quality==='720p') || torrents[0];
         if (!torrent) return null;
@@ -489,7 +496,13 @@ app.get('/api/download/trailer/:videoId', async (req, res) => {
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
         res.setHeader('Transfer-Encoding', 'chunked');
-        const proc = spawn(YT_DLP_PATH, ['--format','bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best','--output','-','--no-playlist','--quiet','--no-warnings','--user-agent','Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36','--extractor-args','youtube:player_client=android','--no-check-certificates',ytUrl], { stdio: ['ignore','pipe','pipe'] });
+        const proc = spawn(YT_DLP_PATH, [
+            '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            '--output', '-', '--no-playlist', '--quiet', '--no-warnings',
+            '--user-agent', 'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36',
+            '--extractor-args', 'youtube:player_client=android,web',
+            '--no-check-certificates', '--age-limit', '99', ytUrl,
+        ], { stdio: ['ignore','pipe','pipe'] });
         proc.stderr.on('data', d => console.log(`[yt-dlp] ${d.toString().trim()}`));
         proc.stdout.pipe(res);
         proc.on('close', () => { if (!res.writableEnded) res.end(); });
@@ -500,7 +513,8 @@ app.get('/api/download/trailer/:videoId', async (req, res) => {
     if (ytdl) {
         try {
             const info   = await ytdl.getInfo(ytUrl);
-            const format = ytdl.chooseFormat(info.formats, { quality: 'highestvideo', filter: f => f.container==='mp4'&&f.hasAudio }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
+            const format = ytdl.chooseFormat(info.formats, { quality: 'highestvideo', filter: f => f.container==='mp4'&&f.hasAudio })
+                        || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
             if (!format) return res.status(404).json({ success: false, error: 'No format found' });
             res.setHeader('Content-Type', 'video/mp4');
             res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -523,7 +537,9 @@ app.get('/api/download/:type/:tmdbId', async (req, res) => {
     const { season=1, episode=1, quality='720p', title='video' } = req.query;
     console.log(`⬇️  Download: ${type} ${tmdbId}`);
     try {
-        const torrentInfo = type==='movie' ? await searchYIFY(tmdbId, quality==='best'?'720p':quality) : await searchEZTV(tmdbId, parseInt(season), parseInt(episode));
+        const torrentInfo = type==='movie'
+            ? await searchYIFY(tmdbId, quality==='best'?'720p':quality)
+            : await searchEZTV(tmdbId, parseInt(season), parseInt(episode));
         if (!torrentInfo?.magnet) return res.status(404).json({ success: false, error: `No torrent found for this ${type}.` });
         const filename = safeFilename(torrentInfo.title||title) + '.mp4';
         console.log(`🧲 ${torrentInfo.title} — Seeds: ${torrentInfo.seeds}`);
@@ -537,23 +553,6 @@ app.get('/api/download/:type/:tmdbId', async (req, res) => {
 app.delete('/api/download/cancel/:id', (req, res) => res.json({ success: true, message: 'Use browser stop button to cancel.' }));
 
 // ============================================================
-// POPULAR (legacy)
-// ============================================================
-app.get('/api/popular/:type', async (req, res) => {
-    try {
-        const data = await tmdbFetch(`/${req.params.type}/popular`, { page: req.query.page||1 });
-        res.json({ success: true, data });
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
-app.get('/api/top-rated/:type', async (req, res) => {
-    try {
-        const data = await tmdbFetch(`/${req.params.type}/top_rated`, { page: req.query.page||1 });
-        res.json({ success: true, data });
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
-// ============================================================
 // START
 // ============================================================
 app.listen(PORT, () => {
@@ -565,5 +564,5 @@ app.listen(PORT, () => {
     console.log(`🔧 yt-dlp:      ${YT_DLP_PATH ? '✅' : '❌'}`);
     console.log(`🎬 Embed sources: ${EMBED_SOURCES.map(s=>s.name).join(', ')}`);
     console.log('');
-    console.log(`🚀 YOUFLEX Backend v3.1 running on port ${PORT}`);
+    console.log(`🚀 YOUFLEX Backend v3.2 running on port ${PORT}`);
 });
