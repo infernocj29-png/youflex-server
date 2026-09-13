@@ -17,6 +17,25 @@ const TMDB_API_KEY    = process.env.TMDB_API_KEY    || '33ef7aaa3002731060f718f2
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyCxCmXs4P4P8SenCmTlj5eawG4ccNP2FEg';
 const TMDB_BASE       = 'https://api.themoviedb.org/3';
 
+// ── Auto-install yt-dlp if missing ───────────────────────────
+const fs = require('fs');
+(async () => {
+    const ytDlpPath = path.join(__dirname, 'bin/yt-dlp');
+    if (!fs.existsSync(ytDlpPath)) {
+        console.log('📥 Installing yt-dlp...');
+        try {
+            fs.mkdirSync(path.join(__dirname, 'bin'), { recursive: true });
+            execSync(
+                `curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${ytDlpPath} && chmod +x ${ytDlpPath}`,
+                { stdio: 'inherit', timeout: 60000 }
+            );
+            console.log('✅ yt-dlp installed successfully');
+        } catch (err) {
+            console.error('❌ Failed to install yt-dlp:', err.message);
+        }
+    }
+})();
+
 // ── CORS ──────────────────────────────────────────────────────
 app.use(cors({
     origin: ['https://youflex.netlify.app', 'http://localhost:3000', 'http://localhost:5500', 'http://127.0.0.1:5500'],
