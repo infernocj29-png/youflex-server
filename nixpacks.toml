@@ -1,0 +1,13 @@
+[phases.setup]
+nixPkgs = ["nodejs_18", "curl"]
+
+[phases.build]
+cmds = [
+    "npm install",
+    "mkdir -p bin",
+    "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o bin/yt-dlp",
+    "chmod +x bin/yt-dlp"
+]
+
+[start]
+cmd = "node server.js"
