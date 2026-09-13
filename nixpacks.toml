@@ -1,7 +1,7 @@
 provider = "node"
 
 [phases.setup]
-nixPkgs = ["nodejs_18", "curl"]
+nixPkgs = ["nodejs_20", "curl"]
 
 [phases.build]
 cmds = [
