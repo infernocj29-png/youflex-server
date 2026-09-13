@@ -2,7 +2,7 @@
 // YOUFLEX DOWNLOAD MANAGER — with quality picker
 // ============================================================
 
-const API_BASE_DL = 'https://youflex-server.onrender.com/api';
+const API_BASE_DL = 'https://youflex-server.up.railway.app/api';
 
 // ── Inject styles ─────────────────────────────────────────────
 const _dlStyle = document.createElement('style');
