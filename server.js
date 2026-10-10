@@ -1,5 +1,5 @@
 // ============================================================
-// YOUFLEX BACKEND v3.3 — Complete Edition
+// YOUFLEX BACKEND v3.4 — Complete Edition
 // Changes vs v3.2:
 //  • FIX  /api/episodes/:tvId/:season now returns { data:{ episodes, ... } }
 //         (the frontend reads `data`, so episodes always showed as "not found")
@@ -10,6 +10,9 @@
 //  • FIX  trailer route also returns `name`
 //  • SEC  API keys are read ONLY from environment variables
 //  • SEC  server.js / package.json / .env / bin are no longer publicly served
+//  v3.4:
+//  • Serves index.html + assets itself AND works for the Netlify site (CORS incl. previews)
+//  • Trailers: season-aware, verified playable (oEmbed), correct-title YouTube fallback, cached
 // ============================================================
 'use strict';
 
@@ -50,23 +53,50 @@ if (!YOUTUBE_API_KEY) console.warn('⚠️  YOUTUBE_API_KEY is not set — YouTu
     }
 })();
 
-// ── CORS ──────────────────────────────────────────────────────
+// ── CORS: Netlify site + this server + local dev ─────────────
+// Extra origins (custom domain etc.) → env EXTRA_ORIGINS="https://a.com,https://b.com"
+const EXTRA_ORIGINS = (process.env.EXTRA_ORIGINS || '').split(',').map(x => x.trim()).filter(Boolean);
+const FIXED_ORIGINS = new Set(['https://youflex.netlify.app', ...EXTRA_ORIGINS]);
+function isAllowedOrigin(origin) {
+    if (!origin) return true;                          // same-origin / curl / server-to-server
+    if (FIXED_ORIGINS.has(origin)) return true;
+    try {
+        const { hostname } = new URL(origin);
+        if (hostname === 'localhost' || hostname === '127.0.0.1') return true;           // any local port
+        if (hostname === 'youflex.netlify.app' || /--youflex\.netlify\.app$/.test(hostname)) return true; // Netlify previews
+        if (hostname.endsWith('.up.railway.app') || hostname.endsWith('.onrender.com')) return true;      // this server's own host
+    } catch (_) {}
+    return false;
+}
 app.use(cors({
-    origin: ['https://youflex.netlify.app', 'http://localhost:3000', 'http://localhost:5500', 'http://127.0.0.1:5500'],
+    origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
     credentials: true,
     methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Range'],
+    exposedHeaders: ['Content-Disposition', 'Content-Length', 'Content-Range', 'Accept-Ranges'],
+    maxAge: 86400,
 }));
 app.use(express.json());
 
+// ── Frontend hosting: this server also serves index.html + assets ──
 // Never expose backend source / config through the static handler
 app.use((req, res, next) => {
-    if (/^\/(server\.js|package(-lock)?\.json|\.env.*|\.git.*|bin\/|node_modules\/)/i.test(req.path)) {
+    if (/^\/(server\.js|package(-lock)?\.json|\.env.*|\.git.*|bin\/|node_modules\/)|\.md$/i.test(req.path)) {
         return res.status(404).end();
     }
     next();
 });
-app.use(express.static(path.join(__dirname)));
+function sendIndex(req, res) {
+    const f = path.join(__dirname, 'index.html');
+    if (!fs.existsSync(f)) return res.status(404).json({ success: false, error: 'index.html not found next to server.js' });
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(f);
+}
+app.get('/', sendIndex);
+app.use(express.static(__dirname, {
+    index: false,
+    setHeaders: (res, fp) => { if (fp.endsWith('.html') || fp.endsWith('manifest.json')) res.setHeader('Cache-Control', 'no-cache'); },
+}));
 
 // ── TMDB helper ───────────────────────────────────────────────
 async function tmdbFetch(endpoint, params = {}) {
@@ -77,37 +107,136 @@ async function tmdbFetch(endpoint, params = {}) {
     return res.data;
 }
 
-// ── YouTube trailer helper ────────────────────────────────────
-async function getYouTubeTrailer(title, year, type) {
-    if (!YOUTUBE_API_KEY) return null;
+// ── Trailer helpers ───────────────────────────────────────────
+const TRAILER_EXCLUDED = ['behind the scenes', 'bts', 'clip', 'featurette', 'bloopers', 'deleted', 'making of', 'interview', 'reaction', 'review', 'recap', '#shorts', '| shorts'];
+const normTitle = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const trailerCache = new Map();           // key -> { ts, data }
+const TRAILER_TTL  = 6 * 60 * 60 * 1000;
+
+// keyless check: is this video alive AND allowed to be embedded?  ok:true | false | null(unknown)
+async function checkEmbeddable(videoId) {
     try {
-        const excluded = ['behind the scenes', 'bts', 'clip', 'featurette', 'short', '#shorts', 'bloopers', 'deleted', 'making of', 'interview', 'reaction', 'review'];
+        const r = await axios.get('https://www.youtube.com/oembed', {
+            params: { url: `https://www.youtube.com/watch?v=${videoId}`, format: 'json' },
+            timeout: 6000, validateStatus: () => true,
+        });
+        if (r.status === 200 && r.data) return { ok: true, title: r.data.title, channel: r.data.author_name };
+        if ([401, 403, 404].includes(r.status)) return { ok: false };
+        return { ok: null };
+    } catch (_) { return { ok: null }; }
+}
+
+function trailerScore(v) {
+    const n = (v.name || '').toLowerCase();
+    let sc = 0;
+    if (v.type === 'Trailer') sc += 100;
+    if (v.official) sc += 50;
+    if (n.includes('official')) sc += 20;
+    if (/main|final/.test(n)) sc += 5;
+    if (v.iso_639_1 === 'en') sc += 10;
+    sc += Math.min((v.size || 0) / 100, 15);
+    return sc;
+}
+function rankTrailers(videos) {
+    return (videos || [])
+        .filter(v => v.site === 'YouTube' && v.key && (v.type === 'Trailer' || v.type === 'Teaser')
+                  && !TRAILER_EXCLUDED.some(ex => (v.name || '').toLowerCase().includes(ex)))
+        .sort((a, b) => trailerScore(b) - trailerScore(a) || String(b.published_at).localeCompare(String(a.published_at)));
+}
+
+// YouTube search fallback (title must match so we never play the wrong film)
+async function getYouTubeCandidates(title, year) {
+    if (!YOUTUBE_API_KEY) return [];
+    try {
         const res = await axios.get('https://www.googleapis.com/youtube/v3/search', {
             params: {
                 key: YOUTUBE_API_KEY,
-                q: `${title} ${year} official trailer ${type === 'tv' ? 'series' : 'movie'} -shorts`,
-                part: 'snippet',
-                type: 'video',
-                videoDefinition: 'high',
-                videoDuration: 'medium',
-                maxResults: 10,
-                relevanceLanguage: 'en',
-                videoEmbeddable: 'true',
+                q: `${title} ${year || ''} official trailer`.trim(),
+                part: 'snippet', type: 'video', maxResults: 10,
+                videoEmbeddable: 'true', relevanceLanguage: 'en',
+                // NOTE: no videoDuration filter – 'medium' (4-20min) would exclude almost every trailer
             },
             timeout: 10000,
         });
-        const items    = res.data?.items || [];
-        const trailers = items.filter(i => {
-            const t       = (i.snippet?.title || '').toLowerCase();
-            const isShort = t.includes('#short') || t.includes('short film') || t.includes('| shorts');
-            return (t.includes('trailer') || t.includes('teaser')) && !excluded.some(ex => t.includes(ex)) && !isShort;
-        });
-        const best = trailers.find(i => i.snippet?.title?.toLowerCase().includes('official')) || trailers[0] || items[0];
-        return best ? best.id?.videoId : null;
+        const nt = normTitle(title);
+        return (res.data?.items || []).filter(i => {
+            const t = (i.snippet?.title || '').toLowerCase();
+            return (t.includes('trailer') || t.includes('teaser'))
+                && normTitle(t).includes(nt)
+                && !TRAILER_EXCLUDED.some(ex => t.includes(ex));
+        }).map(i => i.id?.videoId).filter(Boolean);
     } catch (err) {
-        console.error('YouTube trailer error:', err.message);
-        return null;
+        console.error('YouTube search error:', err.message);
+        return [];
     }
+}
+
+// Find the trailer that belongs to THIS movie / show (/ season) and verify it can play
+async function resolveTrailer(type, id, season) {
+    const cacheKey = `${type}-${id}-${season || ''}`;
+    const hit = trailerCache.get(cacheKey);
+    if (hit && Date.now() - hit.ts < TRAILER_TTL) return hit.data;
+
+    const details = await tmdbFetch(`/${type}/${id}`);
+    const title = details.title || details.name;
+    const year  = (details.release_date || details.first_air_date || '').split('-')[0];
+    const langs = ['en', 'null'];
+    if (details.original_language && details.original_language !== 'en') langs.push(details.original_language);
+    const include = langs.join(',');
+
+    const candidates = [];
+    const seen = new Set();
+    const addGroup = async (endpoint) => {
+        try {
+            const d = await tmdbFetch(endpoint, { include_video_language: include });
+            rankTrailers(d.results).forEach(v => { if (!seen.has(v.key)) { seen.add(v.key); candidates.push(v); } });
+        } catch (_) {}
+    };
+
+    if (type === 'tv') {
+        const seasons = (details.seasons || []).map(s => s.season_number).filter(n => n > 0);
+        const wanted  = season && seasons.includes(Number(season)) ? Number(season) : null;
+        if (wanted) await addGroup(`/tv/${id}/season/${wanted}/videos`);   // trailer for the season being watched
+        await addGroup(`/tv/${id}/videos`);                                 // show-level trailer
+        if (!candidates.length) {                                           // fall back to any season trailer
+            for (const sn of [seasons[seasons.length - 1], seasons[0]].filter((v, i, a) => v != null && a.indexOf(v) === i)) {
+                await addGroup(`/tv/${id}/season/${sn}/videos`);
+            }
+        }
+    } else {
+        await addGroup(`/movie/${id}/videos`);
+    }
+
+    // verify the best few candidates in parallel, keep TMDB's ranking order
+    const checkList = async (list) => {
+        const checks = await Promise.all(list.slice(0, 6).map(c => checkEmbeddable(c.key)));
+        const idx = checks.findIndex(c => c.ok !== false);
+        return idx === -1 ? null : { cand: list[idx], info: checks[idx] };
+    };
+
+    let result = null;
+    const good = await checkList(candidates);
+    if (good) {
+        result = {
+            videoId: good.cand.key,
+            title: good.cand.name, name: good.info.title || good.cand.name,
+            channelTitle: good.info.channel || null,
+            source: 'tmdb',
+        };
+    } else {
+        const ytIds = await getYouTubeCandidates(title, year);
+        const good2 = await checkList(ytIds.map(k => ({ key: k, name: `${title} Official Trailer` })));
+        if (good2) {
+            result = {
+                videoId: good2.cand.key,
+                title: `${title} Official Trailer`, name: good2.info.title || `${title} Official Trailer`,
+                channelTitle: good2.info.channel || null,
+                source: 'youtube',
+            };
+        }
+    }
+    if (result) trailerCache.set(cacheKey, { ts: Date.now(), data: result });
+    return result;
 }
 
 // ── yt-dlp ────────────────────────────────────────────────────
@@ -137,7 +266,7 @@ function safeFilename(str) { return (str||'video').replace(/[^\w\s\-().]/g,'').r
 // ============================================================
 // HEALTH
 // ============================================================
-app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.3', timestamp: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.4', timestamp: new Date().toISOString() }));
 
 // ============================================================
 // GENRES
@@ -416,21 +545,10 @@ app.get('/api/top-rated/:type', async (req, res) => {
 app.get('/api/trailer/:type/:id', async (req, res) => {
     try {
         const { type, id } = req.params;
-        const details  = await tmdbFetch(`/${type}/${id}`, { append_to_response: 'videos' });
-        const videos   = details.videos?.results || [];
-        const excluded = ['behind the scenes', 'bts', 'clip', 'featurette', 'short', 'bloopers', 'deleted scenes', 'making of', 'interview'];
-        const trailers = videos.filter(v => {
-            const t = (v.name || '').toLowerCase();
-            return v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser') && !excluded.some(ex => t.includes(ex));
-        });
-        const official    = trailers.find(v => v.name?.toLowerCase().includes('official'));
-        const tmdbTrailer = official || trailers[0];
-        if (tmdbTrailer) return res.json({ success: true, data: { videoId: tmdbTrailer.key, title: tmdbTrailer.name, name: tmdbTrailer.name, source: 'tmdb' } });
-        const title   = details.title || details.name;
-        const year    = (details.release_date || details.first_air_date || '').split('-')[0];
-        const videoId = await getYouTubeTrailer(title, year, type);
-        if (videoId) return res.json({ success: true, data: { videoId, title: `${title} Official Trailer`, name: `${title} Official Trailer`, source: 'youtube' } });
-        res.status(404).json({ success: false, error: 'No trailer found' });
+        if (!['movie', 'tv'].includes(type)) return res.status(400).json({ success: false, error: 'type must be movie or tv' });
+        const result = await resolveTrailer(type, id, req.query.season);
+        if (!result) return res.status(404).json({ success: false, error: 'No playable trailer found' });
+        res.json({ success: true, data: result });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -654,6 +772,15 @@ app.get('/api/download/:type/:tmdbId', async (req, res) => {
 app.delete('/api/download/cancel/:id', (req, res) => res.json({ success: true, message: 'Use browser stop button to cancel.' }));
 
 // ============================================================
+// FALLBACKS  (unknown /api → JSON 404, other pages → index.html)
+// ============================================================
+app.use('/api', (req, res) => res.status(404).json({ success: false, error: 'Not found' }));
+app.use((req, res, next) => {
+    if (req.method === 'GET' && req.accepts('html') && !path.extname(req.path)) return sendIndex(req, res);
+    next();
+});
+
+// ============================================================
 // START
 // ============================================================
 app.listen(PORT, () => {
@@ -665,5 +792,5 @@ app.listen(PORT, () => {
     console.log(`🔧 yt-dlp:      ${YT_DLP_PATH ? '✅' : '❌'}`);
     console.log(`🎬 Embed sources: ${EMBED_SOURCES.map(s=>s.name).join(', ')}`);
     console.log('');
-    console.log(`🚀 YOUFLEX Backend v3.3 running on port ${PORT}`);
+    console.log(`🚀 YOUFLEX Backend v3.4 running on port ${PORT}`);
 });
