@@ -1,5 +1,5 @@
 // ============================================================
-// YOUFLEX BACKEND v3.4 — Complete Edition
+// YOUFLEX BACKEND v3.5 — Complete Edition
 // Changes vs v3.2:
 //  • FIX  /api/episodes/:tvId/:season now returns { data:{ episodes, ... } }
 //         (the frontend reads `data`, so episodes always showed as "not found")
@@ -10,6 +10,7 @@
 //  • FIX  trailer route also returns `name`
 //  • SEC  API keys are read ONLY from environment variables
 //  • SEC  server.js / package.json / .env / bin are no longer publicly served
+//  v3.5: TMDB cache, rate limits, optional gzip/helmet/Sentry, accounts + cloud sync, client error log
 //  v3.4:
 //  • Serves index.html + assets itself AND works for the Netlify site (CORS incl. previews)
 //  • Trailers: season-aware, verified playable (oEmbed), correct-title YouTube fallback, cached
@@ -23,15 +24,23 @@ const path    = require('path');
 const os      = require('os');
 const fs      = require('fs');
 const { spawn, execSync } = require('child_process');
+const crypto = require('crypto');
+// Optional packages — server runs fine without them:  npm i compression helmet @sentry/node
+const opt = name => { try { return require(name); } catch (_) { return null; } };
+const compression = opt('compression');
+const helmet      = opt('helmet');
+const Sentry      = opt('@sentry/node');
 
 const app  = express();
 const PORT = process.env.PORT || 10000;
+app.set('trust proxy', 1);   // real client IP behind Railway/Render (needed for rate limits)
 
 // ⚠️ Set these in your host's Environment Variables (Railway / Render).
 const TMDB_API_KEY    = process.env.TMDB_API_KEY    || '';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 const TMDB_BASE       = 'https://api.themoviedb.org/3';
 
+if (Sentry && process.env.SENTRY_DSN) { try { Sentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 0.1 }); console.log('✅ Sentry enabled'); } catch (e) { console.warn('Sentry init failed:', e.message); } }
 if (!TMDB_API_KEY)    console.error('❌ TMDB_API_KEY is not set — TMDB requests will fail.');
 if (!YOUTUBE_API_KEY) console.warn('⚠️  YOUTUBE_API_KEY is not set — YouTube fallback/stats disabled.');
 
@@ -53,6 +62,28 @@ if (!YOUTUBE_API_KEY) console.warn('⚠️  YOUTUBE_API_KEY is not set — YouTu
     }
 })();
 
+// ── Security headers + gzip (optional packages) ───────────────
+if (helmet) app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' }, frameguard: false }));
+if (compression) app.use(compression());
+
+// ── tiny in-memory rate limiter (no dependency) ───────────────
+function rateLimit({ windowMs, max, message }) {
+    const hits = new Map();
+    setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (v.reset < now) hits.delete(k); }, windowMs).unref();
+    return (req, res, next) => {
+        const now = Date.now();
+        let h = hits.get(req.ip);
+        if (!h || h.reset < now) { h = { count: 0, reset: now + windowMs }; hits.set(req.ip, h); }
+        h.count++;
+        res.setHeader('RateLimit-Remaining', Math.max(0, max - h.count));
+        if (h.count > max) {
+            res.setHeader('Retry-After', Math.ceil((h.reset - now) / 1000));
+            return res.status(429).json({ success: false, error: message || 'Too many requests, slow down.' });
+        }
+        next();
+    };
+}
+
 // ── CORS: Netlify site + this server + local dev ─────────────
 // Extra origins (custom domain etc.) → env EXTRA_ORIGINS="https://a.com,https://b.com"
 const EXTRA_ORIGINS = (process.env.EXTRA_ORIGINS || '').split(',').map(x => x.trim()).filter(Boolean);
@@ -71,17 +102,28 @@ function isAllowedOrigin(origin) {
 app.use(cors({
     origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
     credentials: true,
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Range'],
     exposedHeaders: ['Content-Disposition', 'Content-Length', 'Content-Range', 'Accept-Ranges'],
     maxAge: 86400,
 }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+// Rate limits + browser caching headers for the API
+app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 300 }));
+app.use('/api/auth',     rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: 'Too many sign-in attempts. Try again later.' }));
+app.use('/api/download', rateLimit({ windowMs: 60 * 60 * 1000, max: 6,  message: 'Download limit reached. Try again later.' }));
+app.use('/api/trailer',  rateLimit({ windowMs: 60 * 1000, max: 90 }));
+app.use('/api', (req, res, next) => {
+    if (/^\/(auth|sync|download|health|client-error)/.test(req.path)) res.set('Cache-Control', 'no-store');
+    else res.set('Cache-Control', 'public, max-age=120');
+    next();
+});
 
 // ── Frontend hosting: this server also serves index.html + assets ──
 // Never expose backend source / config through the static handler
 app.use((req, res, next) => {
-    if (/^\/(server\.js|package(-lock)?\.json|\.env.*|\.git.*|bin\/|node_modules\/)|\.md$/i.test(req.path)) {
+    if (/^\/(server\.js|package(-lock)?\.json|\.env.*|\.git.*|bin\/|data\/|node_modules\/)|\.md$/i.test(req.path)) {
         return res.status(404).end();
     }
     next();
@@ -98,13 +140,30 @@ app.use(express.static(__dirname, {
     setHeaders: (res, fp) => { if (fp.endsWith('.html') || fp.endsWith('manifest.json')) res.setHeader('Cache-Control', 'no-cache'); },
 }));
 
-// ── TMDB helper ───────────────────────────────────────────────
+// ── TMDB helper (with in-memory cache + in-flight de-duplication) ──
+const tmdbCache = new Map();
+const tmdbInflight = new Map();
+const TMDB_CACHE_MAX = 800;
+function tmdbTtl(endpoint) {
+    if (endpoint.startsWith('/search')) return 2 * 60 * 1000;
+    if (endpoint.startsWith('/trending')) return 10 * 60 * 1000;
+    return 15 * 60 * 1000;
+}
 async function tmdbFetch(endpoint, params = {}) {
-    const res = await axios.get(`${TMDB_BASE}${endpoint}`, {
+    const key = endpoint + '?' + JSON.stringify(params);
+    const hit = tmdbCache.get(key);
+    if (hit && Date.now() - hit.ts < hit.ttl) return hit.data;
+    if (tmdbInflight.has(key)) return tmdbInflight.get(key);
+    const p = axios.get(`${TMDB_BASE}${endpoint}`, {
         params: { api_key: TMDB_API_KEY, ...params },
         timeout: 10000,
-    });
-    return res.data;
+    }).then(res => {
+        tmdbCache.set(key, { ts: Date.now(), ttl: tmdbTtl(endpoint), data: res.data });
+        if (tmdbCache.size > TMDB_CACHE_MAX) tmdbCache.delete(tmdbCache.keys().next().value);
+        return res.data;
+    }).finally(() => tmdbInflight.delete(key));
+    tmdbInflight.set(key, p);
+    return p;
 }
 
 // ── Trailer helpers ───────────────────────────────────────────
@@ -266,7 +325,7 @@ function safeFilename(str) { return (str||'video').replace(/[^\w\s\-().]/g,'').r
 // ============================================================
 // HEALTH
 // ============================================================
-app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.4', timestamp: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.5', timestamp: new Date().toISOString() }));
 
 // ============================================================
 // GENRES
@@ -772,6 +831,122 @@ app.get('/api/download/:type/:tmdbId', async (req, res) => {
 app.delete('/api/download/cancel/:id', (req, res) => res.json({ success: true, message: 'Use browser stop button to cancel.' }));
 
 // ============================================================
+// ACCOUNTS + CLOUD SYNC  (wishlist / history / continue-watching)
+// File-based store (no external service). On Railway/Render attach a
+// persistent volume and set DATA_DIR to its mount path, otherwise the
+// file is wiped on each redeploy.
+// ============================================================
+const DATA_DIR   = process.env.DATA_DIR || path.join(__dirname, 'data');
+const STORE_FILE = path.join(DATA_DIR, 'store.json');
+let store = { secret: null, users: {}, sync: {} };
+try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (fs.existsSync(STORE_FILE)) store = { ...store, ...JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')) };
+} catch (e) { console.error('Store load error:', e.message); }
+if (!store.secret) store.secret = crypto.randomBytes(32).toString('hex');
+
+let _saveTimer = null;
+function persistStore() {
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(() => {
+        try {
+            const tmp = STORE_FILE + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(store));
+            fs.renameSync(tmp, STORE_FILE);
+        } catch (e) { console.error('Store save error:', e.message); }
+    }, 400);
+}
+persistStore();
+
+const b64u = v => Buffer.from(v).toString('base64url');
+function signToken(uid) {
+    const body = b64u(JSON.stringify({ uid, exp: Date.now() + 30 * 864e5 }));
+    const sig  = crypto.createHmac('sha256', store.secret).update(body).digest('base64url');
+    return `${body}.${sig}`;
+}
+function verifyToken(token) {
+    try {
+        const [body, sig] = String(token).split('.');
+        const exp = crypto.createHmac('sha256', store.secret).update(body).digest('base64url');
+        if (!sig || sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) return null;
+        const p = JSON.parse(Buffer.from(body, 'base64url').toString());
+        return p.exp > Date.now() ? p.uid : null;
+    } catch (_) { return null; }
+}
+function hashPw(pw, salt = crypto.randomBytes(16).toString('hex')) {
+    return { salt, hash: crypto.scryptSync(pw, salt, 64).toString('hex') };
+}
+function checkPw(pw, user) {
+    const h = crypto.scryptSync(pw, user.salt, 64);
+    const e = Buffer.from(user.hash, 'hex');
+    return h.length === e.length && crypto.timingSafeEqual(h, e);
+}
+function requireAuth(req, res, next) {
+    const m = (req.headers.authorization || '').match(/^Bearer (.+)$/);
+    const uid = m && verifyToken(m[1]);
+    if (!uid || !store.users[uid]) return res.status(401).json({ success: false, error: 'Not signed in' });
+    req.uid = uid;
+    next();
+}
+const findUserByEmail = email => Object.values(store.users).find(u => u.email === email);
+const cleanEmail = e => String(e || '').trim().toLowerCase();
+const validEmail = e => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e) && e.length <= 120;
+
+app.post('/api/auth/signup', (req, res) => {
+    const email = cleanEmail(req.body?.email), password = String(req.body?.password || '');
+    if (!validEmail(email)) return res.status(400).json({ success: false, error: 'Enter a valid email address.' });
+    if (password.length < 8 || password.length > 128) return res.status(400).json({ success: false, error: 'Password must be 8–128 characters.' });
+    if (findUserByEmail(email)) return res.status(409).json({ success: false, error: 'An account with this email already exists.' });
+    const id = crypto.randomBytes(12).toString('hex');
+    store.users[id] = { id, email, ...hashPw(password), createdAt: Date.now() };
+    persistStore();
+    res.json({ success: true, data: { token: signToken(id), email } });
+});
+
+app.post('/api/auth/login', (req, res) => {
+    const email = cleanEmail(req.body?.email), password = String(req.body?.password || '');
+    const user = findUserByEmail(email);
+    if (!user || !checkPw(password, user)) return res.status(401).json({ success: false, error: 'Incorrect email or password.' });
+    res.json({ success: true, data: { token: signToken(user.id), email: user.email } });
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+    res.json({ success: true, data: { email: store.users[req.uid].email } });
+});
+
+app.delete('/api/auth/account', requireAuth, (req, res) => {
+    delete store.users[req.uid];
+    delete store.sync[req.uid];
+    persistStore();
+    res.json({ success: true });
+});
+
+const capArr = (a, n) => Array.isArray(a) ? a.slice(0, n) : [];
+app.get('/api/sync', requireAuth, (req, res) => {
+    const rec = store.sync[req.uid] || { data: { wishlist: [], history: [], continue: [] }, updatedAt: 0 };
+    res.json({ success: true, data: rec });
+});
+app.put('/api/sync', requireAuth, (req, res) => {
+    const d = req.body?.data || {};
+    const clean = { wishlist: capArr(d.wishlist, 500), history: capArr(d.history, 80), continue: capArr(d.continue, 20) };
+    if (JSON.stringify(clean).length > 600000) return res.status(413).json({ success: false, error: 'Data too large' });
+    const updatedAt = Date.now();
+    store.sync[req.uid] = { data: clean, updatedAt };
+    persistStore();
+    res.json({ success: true, data: { updatedAt } });
+});
+
+// ── Client-side error log (shows up in your host logs / Sentry) ──
+let _clientErrCount = 0;
+app.post('/api/client-error', rateLimit({ windowMs: 60 * 1000, max: 20 }), (req, res) => {
+    const b = req.body || {};
+    const line = `[client-error] ${String(b.message || '').slice(0, 300)} @ ${String(b.source || '').slice(0, 200)}:${b.line || 0} | ${String(b.page || '').slice(0, 120)} | ${String(req.headers['user-agent'] || '').slice(0, 120)}`;
+    if (_clientErrCount++ < 500) console.warn(line);
+    if (Sentry && process.env.SENTRY_DSN) { try { Sentry.captureMessage(line, 'warning'); } catch (_) {} }
+    res.json({ success: true });
+});
+
+// ============================================================
 // FALLBACKS  (unknown /api → JSON 404, other pages → index.html)
 // ============================================================
 app.use('/api', (req, res) => res.status(404).json({ success: false, error: 'Not found' }));
@@ -783,6 +958,13 @@ app.use((req, res, next) => {
 // ============================================================
 // START
 // ============================================================
+if (Sentry && process.env.SENTRY_DSN && Sentry.setupExpressErrorHandler) { try { Sentry.setupExpressErrorHandler(app); } catch (_) {} }
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err.message);
+    if (res.headersSent) return next(err);
+    res.status(err.status || 500).json({ success: false, error: 'Server error' });
+});
+
 app.listen(PORT, () => {
     console.log('');
     console.log('🚀 YOUFLEX Backend Starting…');
@@ -790,7 +972,8 @@ app.listen(PORT, () => {
     console.log(`📺 YouTube:     ${YOUTUBE_API_KEY ? '✅' : '⚠️  (missing key)'}`);
     console.log(`📥 WebTorrent:  ${WebTorrent ? '✅' : '❌'}`);
     console.log(`🔧 yt-dlp:      ${YT_DLP_PATH ? '✅' : '❌'}`);
+    console.log(`🗜️  gzip: ${compression ? '✅' : '—'}  🛡️ helmet: ${helmet ? '✅' : '—'}  💾 data dir: ${DATA_DIR}`);
     console.log(`🎬 Embed sources: ${EMBED_SOURCES.map(s=>s.name).join(', ')}`);
     console.log('');
-    console.log(`🚀 YOUFLEX Backend v3.4 running on port ${PORT}`);
+    console.log(`🚀 YOUFLEX Backend v3.5 running on port ${PORT}`);
 });
