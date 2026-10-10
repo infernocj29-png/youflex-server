@@ -1,5 +1,15 @@
 // ============================================================
-// YOUFLEX BACKEND v3.2 — Complete Edition
+// YOUFLEX BACKEND v3.3 — Complete Edition
+// Changes vs v3.2:
+//  • FIX  /api/episodes/:tvId/:season now returns { data:{ episodes, ... } }
+//         (the frontend reads `data`, so episodes always showed as "not found")
+//  • FIX  /api/embed/* now return { embedUrl, allSources:[{label,name,url}] }
+//         (frontend expects label/embedUrl/allSources; dead hosts removed)
+//  • NEW  /api/logo/:type/:id          – stylised title-logo artwork (TMDB)
+//  • NEW  /api/youtube/video/:id       – views / likes / channel for trailers
+//  • FIX  trailer route also returns `name`
+//  • SEC  API keys are read ONLY from environment variables
+//  • SEC  server.js / package.json / .env / bin are no longer publicly served
 // ============================================================
 'use strict';
 
@@ -8,17 +18,21 @@ const cors    = require('cors');
 const axios   = require('axios');
 const path    = require('path');
 const os      = require('os');
+const fs      = require('fs');
 const { spawn, execSync } = require('child_process');
 
 const app  = express();
 const PORT = process.env.PORT || 10000;
 
-const TMDB_API_KEY    = process.env.TMDB_API_KEY    || '33ef7aaa3002731060f718f25dd995ac';
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyCxCmXs4P4P8SenCmTlj5eawG4ccNP2FEg';
+// ⚠️ Set these in your host's Environment Variables (Railway / Render).
+const TMDB_API_KEY    = process.env.TMDB_API_KEY    || '';
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 const TMDB_BASE       = 'https://api.themoviedb.org/3';
 
+if (!TMDB_API_KEY)    console.error('❌ TMDB_API_KEY is not set — TMDB requests will fail.');
+if (!YOUTUBE_API_KEY) console.warn('⚠️  YOUTUBE_API_KEY is not set — YouTube fallback/stats disabled.');
+
 // ── Auto-install yt-dlp if missing ───────────────────────────
-const fs = require('fs');
 (async () => {
     const ytDlpPath = path.join(__dirname, 'bin/yt-dlp');
     if (!fs.existsSync(ytDlpPath)) {
@@ -44,6 +58,14 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json());
+
+// Never expose backend source / config through the static handler
+app.use((req, res, next) => {
+    if (/^\/(server\.js|package(-lock)?\.json|\.env.*|\.git.*|bin\/|node_modules\/)/i.test(req.path)) {
+        return res.status(404).end();
+    }
+    next();
+});
 app.use(express.static(path.join(__dirname)));
 
 // ── TMDB helper ───────────────────────────────────────────────
@@ -57,6 +79,7 @@ async function tmdbFetch(endpoint, params = {}) {
 
 // ── YouTube trailer helper ────────────────────────────────────
 async function getYouTubeTrailer(title, year, type) {
+    if (!YOUTUBE_API_KEY) return null;
     try {
         const excluded = ['behind the scenes', 'bts', 'clip', 'featurette', 'short', '#shorts', 'bloopers', 'deleted', 'making of', 'interview', 'reaction', 'review'];
         const res = await axios.get('https://www.googleapis.com/youtube/v3/search', {
@@ -114,7 +137,7 @@ function safeFilename(str) { return (str||'video').replace(/[^\w\s\-().]/g,'').r
 // ============================================================
 // HEALTH
 // ============================================================
-app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.2', timestamp: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.3', timestamp: new Date().toISOString() }));
 
 // ============================================================
 // GENRES
@@ -260,6 +283,23 @@ app.get('/api/tv/:id', async (req, res) => {
 });
 
 // ============================================================
+// TITLE LOGO  (stylised movie-name artwork)   — NEW
+// Returns { logo_path, logos:[...] }; best English logo first.
+// ============================================================
+app.get('/api/logo/:type/:id', async (req, res) => {
+    try {
+        const { type, id } = req.params;
+        if (!['movie', 'tv'].includes(type)) return res.status(400).json({ success: false, error: 'type must be movie or tv' });
+        const d = await tmdbFetch(`/${type}/${id}/images`, { include_image_language: 'en,null' });
+        const logos = (d.logos || []).filter(l => l.file_path);
+        const score = l => (l.iso_639_1 === 'en' ? 2 : (l.iso_639_1 == null ? 1 : 0)) * 1000 + (l.vote_average || 0);
+        logos.sort((a, b) => score(b) - score(a));
+        res.set('Cache-Control', 'public, max-age=86400');
+        res.json({ success: true, data: { logo_path: logos[0]?.file_path || null, logos: logos.slice(0, 5) } });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ============================================================
 // CREDITS
 // ============================================================
 app.get('/api/credits/:type/:id', async (req, res) => {
@@ -270,12 +310,17 @@ app.get('/api/credits/:type/:id', async (req, res) => {
 });
 
 // ============================================================
-// EPISODES
+// EPISODES   — FIXED: episodes now live under `data`
 // ============================================================
 app.get('/api/episodes/:tvId/:season', async (req, res) => {
     try {
-        const data = await tmdbFetch(`/tv/${req.params.tvId}/season/${req.params.season}`);
-        res.json({ success: true, episodes: data.episodes || [], season: data });
+        const season = await tmdbFetch(`/tv/${req.params.tvId}/season/${req.params.season}`);
+        const episodes = season.episodes || [];
+        res.json({
+            success: true,
+            data: { ...season, episodes },   // frontend reads data.episodes
+            episodes,                        // kept for any older client
+        });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -380,11 +425,11 @@ app.get('/api/trailer/:type/:id', async (req, res) => {
         });
         const official    = trailers.find(v => v.name?.toLowerCase().includes('official'));
         const tmdbTrailer = official || trailers[0];
-        if (tmdbTrailer) return res.json({ success: true, data: { videoId: tmdbTrailer.key, title: tmdbTrailer.name, source: 'tmdb' } });
+        if (tmdbTrailer) return res.json({ success: true, data: { videoId: tmdbTrailer.key, title: tmdbTrailer.name, name: tmdbTrailer.name, source: 'tmdb' } });
         const title   = details.title || details.name;
         const year    = (details.release_date || details.first_air_date || '').split('-')[0];
         const videoId = await getYouTubeTrailer(title, year, type);
-        if (videoId) return res.json({ success: true, data: { videoId, title: `${title} Official Trailer`, source: 'youtube' } });
+        if (videoId) return res.json({ success: true, data: { videoId, title: `${title} Official Trailer`, name: `${title} Official Trailer`, source: 'youtube' } });
         res.status(404).json({ success: false, error: 'No trailer found' });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
@@ -400,30 +445,67 @@ app.get('/api/youtube/search', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
+// NEW — stats for the trailer info bar (views / likes / channel)
+app.get('/api/youtube/video/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!/^[a-zA-Z0-9_-]{11}$/.test(id)) return res.status(400).json({ success: false, error: 'Invalid YouTube video ID' });
+        if (!YOUTUBE_API_KEY) return res.status(503).json({ success: false, error: 'YouTube API key not configured' });
+        const r = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+            params: { key: YOUTUBE_API_KEY, id, part: 'snippet,statistics' },
+            timeout: 10000,
+        });
+        const v = r.data?.items?.[0];
+        if (!v) return res.status(404).json({ success: false, error: 'Video not found' });
+        res.json({ success: true, data: {
+            videoId: id,
+            title: v.snippet?.title,
+            channelTitle: v.snippet?.channelTitle,
+            viewCount: v.statistics?.viewCount,
+            likeCount: v.statistics?.likeCount,
+        }});
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
 // ============================================================
-// EMBED SOURCES
+// EMBED SOURCES   — FIXED response shape (label / embedUrl / allSources)
+// Dead hosts (vidsrc.xyz, embed.su) removed.
 // ============================================================
 const EMBED_SOURCES = [
-    { name: 'Source 1', movie: id => `https://vidsrc.me/embed/movie?tmdb=${id}`,       tv: (id,s,e) => `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
-    { name: 'Source 2', movie: id => `https://vidsrc.to/embed/movie/${id}`,             tv: (id,s,e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}` },
-    { name: 'Source 3', movie: id => `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1`, tv: (id,s,e) => `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1&s=${s}&e=${e}` },
-    { name: 'Source 4', movie: id => `https://vidsrc.xyz/embed/movie?tmdb=${id}`,       tv: (id,s,e) => `https://vidsrc.xyz/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
-    { name: 'Source 5', movie: id => `https://embed.su/embed/movie/${id}`,              tv: (id,s,e) => `https://embed.su/embed/tv/${id}/${s}/${e}` },
+    { name: 'Source 1', movie: id => `https://vidsrc.me/embed/movie?tmdb=${id}`,
+                        tv: (id,s,e) => `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
+    { name: 'Source 2', movie: id => `https://vidsrc.to/embed/movie/${id}`,
+                        tv: (id,s,e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}` },
+    { name: 'Source 3', movie: id => `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1`,
+                        tv: (id,s,e) => `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1&s=${s}&e=${e}` },
+    { name: 'Source 4', movie: id => `https://www.smashystream.xyz/playere.php?tmdb=${id}`,
+                        tv: (id,s,e) => `https://www.smashystream.xyz/playere.php?tmdb=${id}&season=${s}&episode=${e}` },
+    { name: 'Source 5', movie: id => `https://www.2embed.cc/embed/${id}`,
+                        tv: (id,s,e) => `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}` },
 ];
 
+function embedPayload(list) {
+    const sources = list.map(s => ({ name: s.name, label: s.name, url: s.url }));
+    return { embedUrl: sources[0]?.url || null, sources, allSources: sources };
+}
+
 app.get('/api/embed/movie/:tmdbId', (req, res) => {
-    res.json({ success: true, data: { sources: EMBED_SOURCES.map(s => ({ name: s.name, url: s.movie(req.params.tmdbId) })) } });
+    const { tmdbId } = req.params;
+    res.json({ success: true, data: embedPayload(EMBED_SOURCES.map(s => ({ name: s.name, url: s.movie(tmdbId) }))) });
 });
 
 app.get('/api/embed/tv/:tmdbId/:season/:episode', (req, res) => {
     const { tmdbId, season, episode } = req.params;
-    res.json({ success: true, data: { sources: EMBED_SOURCES.map(s => ({ name: s.name, url: s.tv(tmdbId, season, episode) })) } });
+    res.json({ success: true, data: embedPayload(EMBED_SOURCES.map(s => ({ name: s.name, url: s.tv(tmdbId, season, episode) }))) });
 });
 
 app.get('/api/embed/sources/:type/:tmdbId', (req, res) => {
     const { type, tmdbId } = req.params;
     const { season = 1, episode = 1 } = req.query;
-    res.json({ success: true, data: { sources: EMBED_SOURCES.map(s => ({ name: s.name, url: type === 'tv' ? s.tv(tmdbId, season, episode) : s.movie(tmdbId) })) } });
+    res.json({ success: true, data: embedPayload(EMBED_SOURCES.map(s => ({
+        name: s.name,
+        url: type === 'tv' ? s.tv(tmdbId, season, episode) : s.movie(tmdbId),
+    }))) });
 });
 
 // ============================================================
@@ -577,11 +659,11 @@ app.delete('/api/download/cancel/:id', (req, res) => res.json({ success: true, m
 app.listen(PORT, () => {
     console.log('');
     console.log('🚀 YOUFLEX Backend Starting…');
-    console.log(`📡 TMDB:        ✅`);
-    console.log(`📺 YouTube:     ✅`);
+    console.log(`📡 TMDB:        ${TMDB_API_KEY ? '✅' : '❌ (missing key)'}`);
+    console.log(`📺 YouTube:     ${YOUTUBE_API_KEY ? '✅' : '⚠️  (missing key)'}`);
     console.log(`📥 WebTorrent:  ${WebTorrent ? '✅' : '❌'}`);
     console.log(`🔧 yt-dlp:      ${YT_DLP_PATH ? '✅' : '❌'}`);
     console.log(`🎬 Embed sources: ${EMBED_SOURCES.map(s=>s.name).join(', ')}`);
     console.log('');
-    console.log(`🚀 YOUFLEX Backend v3.2 running on port ${PORT}`);
+    console.log(`🚀 YOUFLEX Backend v3.3 running on port ${PORT}`);
 });
