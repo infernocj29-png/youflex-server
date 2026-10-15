@@ -1,5 +1,5 @@
 // ============================================================
-// YOUFLEX BACKEND v3.5 — Complete Edition
+// YOUFLEX BACKEND v3.6 — Complete Edition
 // Changes vs v3.2:
 //  • FIX  /api/episodes/:tvId/:season now returns { data:{ episodes, ... } }
 //         (the frontend reads `data`, so episodes always showed as "not found")
@@ -10,6 +10,7 @@
 //  • FIX  trailer route also returns `name`
 //  • SEC  API keys are read ONLY from environment variables
 //  • SEC  server.js / package.json / .env / bin are no longer publicly served
+//  v3.6: Clips API (/api/clips/*), logo prefetch on /api/trending (+ images on /details) → faster title branding
 //  v3.5: TMDB cache, rate limits, optional gzip/helmet/Sentry, accounts + cloud sync, client error log
 //  v3.4:
 //  • Serves index.html + assets itself AND works for the Netlify site (CORS incl. previews)
@@ -114,6 +115,7 @@ app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 300 }));
 app.use('/api/auth',     rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: 'Too many sign-in attempts. Try again later.' }));
 app.use('/api/download', rateLimit({ windowMs: 60 * 60 * 1000, max: 6,  message: 'Download limit reached. Try again later.' }));
 app.use('/api/trailer',  rateLimit({ windowMs: 60 * 1000, max: 90 }));
+app.use('/api/clips',    rateLimit({ windowMs: 60 * 1000, max: 150 }));
 app.use('/api', (req, res, next) => {
     if (/^\/(auth|sync|download|health|client-error)/.test(req.path)) res.set('Cache-Control', 'no-store');
     else res.set('Cache-Control', 'public, max-age=120');
@@ -325,7 +327,7 @@ function safeFilename(str) { return (str||'video').replace(/[^\w\s\-().]/g,'').r
 // ============================================================
 // HEALTH
 // ============================================================
-app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.5', timestamp: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({ success: true, service: 'YOUFLEX API', version: '3.6', timestamp: new Date().toISOString() }));
 
 // ============================================================
 // GENRES
@@ -349,11 +351,37 @@ app.get('/api/genres/:type', async (req, res) => {
 // ============================================================
 // TRENDING — returns results array directly
 // ============================================================
+// ── title-logo helper (24h cache) ─────────────────────────────
+const logoCache = new Map();
+async function getLogoPath(type, id) {
+    const k = `${type}-${id}`;
+    const hit = logoCache.get(k);
+    if (hit && Date.now() - hit.ts < 24 * 60 * 60 * 1000) return hit.path;
+    try {
+        const d = await tmdbFetch(`/${type}/${id}/images`, { include_image_language: 'en,null' });
+        const logos = (d.logos || []).filter(l => l.file_path);
+        const score = l => (l.iso_639_1 === 'en' ? 2 : (l.iso_639_1 == null ? 1 : 0)) * 1000 + (l.vote_average || 0);
+        logos.sort((a, b) => score(b) - score(a));
+        const path = logos[0]?.file_path || null;
+        logoCache.set(k, { ts: Date.now(), path });
+        return path;
+    } catch (_) { return undefined; }
+}
+
 app.get('/api/trending', async (req, res) => {
     try {
         const { type = 'all', page = 1 } = req.query;
         const data = await tmdbFetch(`/trending/${type}/week`, { page });
-        res.json({ success: true, data: data.results || [] });
+        const results = data.results || [];
+        const titles = results.filter(r => r.media_type !== 'person');
+        const typeOf = r => r.media_type || (type === 'tv' ? 'tv' : 'movie');
+        // top titles get their branding logo inline (max 1.5s wait); the rest are warmed in the background
+        await Promise.race([
+            Promise.all(titles.slice(0, 8).map(async r => { const p = await getLogoPath(typeOf(r), r.id); if (p) r.logo_path = p; })),
+            new Promise(r => setTimeout(r, 1500)),
+        ]);
+        titles.slice(8).forEach(r => { getLogoPath(typeOf(r), r.id).then(p => { if (p) r.logo_path = p; }).catch(() => {}); });
+        res.json({ success: true, data: results });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -446,7 +474,8 @@ app.get('/api/search', async (req, res) => {
 app.get('/api/details/:type/:id', async (req, res) => {
     try {
         const data = await tmdbFetch(`/${req.params.type}/${req.params.id}`, {
-            append_to_response: 'credits,videos,similar,recommendations,external_ids,watch/providers',
+            append_to_response: 'credits,videos,similar,recommendations,external_ids,watch/providers,images',
+            include_image_language: 'en,null',
         });
         res.json({ success: true, data });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -641,6 +670,252 @@ app.get('/api/youtube/video/:id', async (req, res) => {
             viewCount: v.statistics?.viewCount,
             likeCount: v.statistics?.likeCount,
         }});
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ============================================================
+// CLIPS — official clips / teasers / featurettes from TMDB Videos (YouTube),
+// every video verified as embeddable before it is ever returned.
+// No full-length stream URLs are used; nothing is fabricated.
+// ============================================================
+const CLIP_TYPES      = ['Clip', 'Bloopers', 'Featurette', 'Teaser'];
+const CLIP_TYPE_SCORE = { Clip: 100, Bloopers: 60, Featurette: 40, Teaser: 30 };
+const CLIP_EXCLUDED   = ['reaction', 'review', 'recap', 'interview', '#shorts', '| shorts', 'behind the scenes', 'bts', 'explained', 'breakdown', 'top 10'];
+const GENRE_LABEL = { 28: 'Action', 12: 'Adventure', 16: 'Animation', 35: 'Comedy', 80: 'Crime', 99: 'Documentary', 18: 'Drama', 10751: 'Family', 14: 'Fantasy', 36: 'History', 27: 'Horror', 10402: 'Music', 9648: 'Mystery', 10749: 'Romance', 878: 'Sci-Fi', 53: 'Thriller', 10752: 'War', 37: 'Western', 10759: 'Action', 10765: 'Sci-Fi', 10768: 'War' };
+const categoryOf = ids => { for (const g of ids || []) if (GENRE_LABEL[g]) return GENRE_LABEL[g]; return 'Featured'; };
+
+async function mapLimit(arr, limit, fn) {
+    const out = new Array(arr.length); let i = 0;
+    await Promise.all(Array.from({ length: Math.min(limit, arr.length) }, async () => {
+        while (i < arr.length) { const k = i++; try { out[k] = await fn(arr[k], k); } catch (_) { out[k] = null; } }
+    }));
+    return out;
+}
+
+const clipCache = new Map(), clipInflight = new Map();
+async function clipCached(key, fn, ttl = 10 * 60 * 1000) {
+    const h = clipCache.get(key);
+    if (h && Date.now() - h.ts < ttl) return h.data;
+    if (clipInflight.has(key)) return clipInflight.get(key);
+    const p = fn().then(d => {
+        clipCache.set(key, { ts: Date.now(), data: d });
+        if (clipCache.size > 300) clipCache.delete(clipCache.keys().next().value);
+        return d;
+    }).finally(() => clipInflight.delete(key));
+    clipInflight.set(key, p);
+    return p;
+}
+
+// embeddable check (cached 24h)
+const embedOkCache = new Map();
+async function embeddableInfo(videoId) {
+    const h = embedOkCache.get(videoId);
+    if (h && Date.now() - h.ts < 24 * 60 * 60 * 1000) return h;
+    const r = await checkEmbeddable(videoId);
+    const info = { ts: Date.now(), ok: r.ok !== false, title: r.title || null, channel: r.channel || null };
+    embedOkCache.set(videoId, info);
+    return info;
+}
+
+// durations via YouTube Data API (optional). -1 = video missing/private → drop it
+const durCache = new Map();
+function isoToSeconds(iso) {
+    const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso || '');
+    return m ? (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0) : 0;
+}
+async function loadDurations(ids) {
+    if (!YOUTUBE_API_KEY) return;
+    const need = ids.filter(id => !durCache.has(id));
+    for (let i = 0; i < need.length; i += 50) {
+        const chunk = need.slice(i, i + 50);
+        try {
+            const r = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+                params: { key: YOUTUBE_API_KEY, id: chunk.join(','), part: 'contentDetails' }, timeout: 10000,
+            });
+            const found = new Set();
+            (r.data?.items || []).forEach(it => { found.add(it.id); durCache.set(it.id, isoToSeconds(it.contentDetails?.duration)); });
+            chunk.forEach(id => { if (!found.has(id)) durCache.set(id, -1); });
+        } catch (err) { console.error('YouTube duration error:', err.message); }
+    }
+}
+
+async function titleClipCandidates(type, id) {
+    const d = await tmdbFetch(`/${type}/${id}/videos`, { include_video_language: 'en,null' });
+    return (d.results || [])
+        .filter(v => v.site === 'YouTube' && v.key && CLIP_TYPES.includes(v.type) && !CLIP_EXCLUDED.some(x => (v.name || '').toLowerCase().includes(x)))
+        .map(v => ({ v, score: CLIP_TYPE_SCORE[v.type] + (v.official ? 20 : 0) + Math.min((v.size || 0) / 100, 12) }))
+        .sort((a, b) => b.score - a.score || String(b.v.published_at).localeCompare(String(a.v.published_at)))
+        .map(x => x.v);
+}
+const typeOfTitle = t => t.media_type === 'tv' ? 'tv' : t.media_type === 'movie' ? 'movie' : (t.title ? 'movie' : 'tv');
+
+async function buildClips(titles, { perTitle = 2, limit = 24 } = {}) {
+    const lists = await mapLimit(titles, 8, async t => {
+        const type = typeOfTitle(t);
+        const vids = await titleClipCandidates(type, t.id);
+        const picked = []; let nonClip = 0;
+        for (const v of vids) {
+            if (picked.length >= perTitle) break;
+            if (v.type !== 'Clip') { if (nonClip >= 1) continue; nonClip++; }
+            picked.push({ v, t, type });
+        }
+        return picked;
+    });
+    // interleave: first clip of every title, then second clips …
+    const flat = []; const seen = new Set();
+    for (let r = 0; r < perTitle; r++) for (const l of lists) { const x = l && l[r]; if (x && !seen.has(x.v.key)) { seen.add(x.v.key); flat.push(x); } }
+    const pool = flat.slice(0, Math.ceil(limit * 1.5));
+    const checks = await mapLimit(pool, 8, async x => embeddableInfo(x.v.key));
+    const ok = pool.filter((x, i) => checks[i] && checks[i].ok);
+    await loadDurations(ok.map(x => x.v.key));
+    const items = [];
+    for (const { v, t, type } of ok) {
+        const dur = durCache.get(v.key);
+        if (dur === -1 || dur > 900) continue;                       // missing/private, or too long to be a "clip"
+        items.push({
+            id: v.key, videoId: v.key, name: v.name, kind: v.type,
+            tmdbId: t.id, mediaType: type, title: t.title || t.name,
+            overview: t.overview || '', poster_path: t.poster_path, backdrop_path: t.backdrop_path,
+            genre_ids: t.genre_ids || (t.genres || []).map(g => g.id) || [],
+            category: categoryOf(t.genre_ids || (t.genres || []).map(g => g.id)),
+            vote_average: t.vote_average || 0,
+            year: (t.release_date || t.first_air_date || '').slice(0, 4),
+            duration: dur > 0 ? dur : null,
+            thumb: `https://i.ytimg.com/vi/${v.key}/hqdefault.jpg`,
+            published: v.published_at,
+        });
+        if (items.length >= limit) break;
+    }
+    return items;
+}
+
+// ── section sources ───────────────────────────────────────────
+const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+const tagType = (d, type) => (d.results || []).map(x => ({ ...x, media_type: type }));
+async function mixedTitles(page, movieEP, moviePrm, tvEP, tvPrm) {
+    const [m, t] = await Promise.all([
+        movieEP ? tmdbFetch(movieEP, { ...moviePrm, page }) : { results: [] },
+        tvEP ? tmdbFetch(tvEP, { ...tvPrm, page }) : { results: [] },
+    ]);
+    const A = tagType(m, 'movie'), B = tagType(t, 'tv'), out = [];
+    for (let i = 0; i < Math.max(A.length, B.length); i++) { if (A[i]) out.push(A[i]); if (B[i]) out.push(B[i]); }
+    return out;
+}
+const POP = { sort_by: 'popularity.desc' };
+const CLIP_SECTIONS = {
+    trending:    { label: '🔥 Trending Clips',          titles: async p => (await tmdbFetch('/trending/all/week', { page: p })).results.filter(x => x.media_type !== 'person') },
+    action:      { label: '💥 Action & Fight Scenes',   titles: p => mixedTitles(p, '/discover/movie', { ...POP, with_genres: 28, 'vote_count.gte': 200 }, '/discover/tv', { ...POP, with_genres: 10759, 'vote_count.gte': 100 }) },
+    comedy:      { label: '😂 Comedy Moments',          titles: p => mixedTitles(p, '/discover/movie', { ...POP, with_genres: 35, 'vote_count.gte': 200 }, '/discover/tv', { ...POP, with_genres: 35, 'vote_count.gte': 100 }) },
+    emotional:   { label: '❤️ Emotional Scenes',        titles: p => mixedTitles(p, '/discover/movie', { ...POP, with_genres: '18|10749', 'vote_average.gte': 7.3, 'vote_count.gte': 500 }, '/discover/tv', { ...POP, with_genres: 18, 'vote_average.gte': 7.8, 'vote_count.gte': 200 }) },
+    shocking:    { label: '😱 Shocking Moments',        titles: p => mixedTitles(p, '/discover/movie', { ...POP, with_genres: '53|27|9648', 'vote_count.gte': 300 }, '/discover/tv', { ...POP, with_genres: '9648|80', 'vote_count.gte': 150 }) },
+    mindblowing: { label: '🧠 Mind-Blowing Scenes',     titles: p => mixedTitles(p, '/discover/movie', { ...POP, with_genres: '878|14', 'vote_average.gte': 7, 'vote_count.gte': 500 }, '/discover/tv', { ...POP, with_genres: 10765, 'vote_count.gte': 200 }) },
+    tv:          { label: '📺 Popular TV Show Clips',   titles: p => mixedTitles(p, null, {}, '/tv/popular', {}) },
+    movies:      { label: '🎬 Movie Highlights',        titles: p => mixedTitles(p, '/movie/popular', {}, null, {}) },
+    recent:      { label: '🆕 Recently Added Clips',    titles: p => mixedTitles(p, '/discover/movie', { sort_by: 'primary_release_date.desc', 'primary_release_date.gte': daysAgo(150), 'primary_release_date.lte': daysAgo(0), 'vote_count.gte': 20 }, '/discover/tv', { sort_by: 'first_air_date.desc', 'first_air_date.gte': daysAgo(150), 'first_air_date.lte': daysAgo(0), 'vote_count.gte': 5 }) },
+};
+const TV_GENRE_MAP = { 28: 10759, 12: 10759, 878: 10765, 14: 10765, 10752: 10768 };
+
+app.get('/api/clips/section/:key', async (req, res) => {
+    try {
+        const def = CLIP_SECTIONS[req.params.key];
+        if (!def) return res.status(404).json({ success: false, error: 'Unknown section' });
+        const page = Math.max(1, Math.min(8, parseInt(req.query.page) || 1));
+        const data = await clipCached(`sec:${req.params.key}:${page}`, async () => {
+            const titles = await def.titles(page);
+            const items = await buildClips(titles.slice(0, 20), { perTitle: 2, limit: 24 });
+            return { key: req.params.key, label: def.label, page, items, hasMore: page < 8 };
+        });
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/clips/featured', async (req, res) => {
+    try {
+        const data = await clipCached('featured', async () => {
+            const d = await tmdbFetch('/trending/all/week', { page: 1 });
+            const titles = (d.results || []).filter(x => x.media_type !== 'person' && x.backdrop_path).slice(0, 12);
+            const items = await buildClips(titles, { perTitle: 1, limit: 5 });
+            return { items };
+        });
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// personalised row: /api/clips/discover?genres=28,35
+app.get('/api/clips/discover', async (req, res) => {
+    try {
+        const ids = String(req.query.genres || '').split(',').map(x => parseInt(x)).filter(Boolean).slice(0, 3);
+        if (!ids.length) return res.status(400).json({ success: false, error: 'genres required' });
+        const page = Math.max(1, Math.min(5, parseInt(req.query.page) || 1));
+        const data = await clipCached(`disc:${ids.join('|')}:${page}`, async () => {
+            const tvIds = [...new Set(ids.map(g => TV_GENRE_MAP[g] || g))];
+            const titles = await mixedTitles(page, '/discover/movie', { ...POP, with_genres: ids.join('|'), 'vote_count.gte': 300 }, '/discover/tv', { ...POP, with_genres: tvIds.join('|'), 'vote_count.gte': 100 });
+            const items = await buildClips(titles.slice(0, 20), { perTitle: 2, limit: 20 });
+            return { key: 'foryou', label: '✨ Picked For You', page, items, hasMore: false };
+        });
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/clips/title/:type/:id', async (req, res) => {
+    try {
+        const { type, id } = req.params;
+        if (!['movie', 'tv'].includes(type)) return res.status(400).json({ success: false, error: 'type must be movie or tv' });
+        const data = await clipCached(`title:${type}:${id}`, async () => {
+            const d = await tmdbFetch(`/${type}/${id}`);
+            const items = await buildClips([{ ...d, media_type: type }], { perTitle: 8, limit: 12 });
+            return { items };
+        });
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// "More like this": other clips from the same title + clips from similar titles
+app.get('/api/clips/similar/:type/:id', async (req, res) => {
+    try {
+        const { type, id } = req.params;
+        if (!['movie', 'tv'].includes(type)) return res.status(400).json({ success: false, error: 'type must be movie or tv' });
+        const data = await clipCached(`sim:${type}:${id}`, async () => {
+            const [d, rec, sim] = await Promise.all([
+                tmdbFetch(`/${type}/${id}`),
+                tmdbFetch(`/${type}/${id}/recommendations`, { page: 1 }).catch(() => ({ results: [] })),
+                tmdbFetch(`/${type}/${id}/similar`, { page: 1 }).catch(() => ({ results: [] })),
+            ]);
+            const seen = new Set([Number(id)]);
+            const related = [...(rec.results || []), ...(sim.results || [])]
+                .filter(x => { if (seen.has(x.id)) return false; seen.add(x.id); return true; })
+                .slice(0, 12).map(x => ({ ...x, media_type: type }));
+            const [same, similar] = await Promise.all([
+                buildClips([{ ...d, media_type: type }], { perTitle: 8, limit: 10 }),
+                buildClips(related, { perTitle: 1, limit: 14 }),
+            ]);
+            return { same, similar };
+        });
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/clips/search', async (req, res) => {
+    try {
+        const q = String(req.query.q || '').trim().slice(0, 80);
+        if (q.length < 2) return res.status(400).json({ success: false, error: 'Query too short' });
+        const data = await clipCached(`search:${q.toLowerCase()}`, async () => {
+            const d = await tmdbFetch('/search/multi', { query: q, page: 1 });
+            const titles = (d.results || []).filter(x => x.media_type === 'movie' || x.media_type === 'tv').slice(0, 10);
+            const items = await buildClips(titles, { perTitle: 3, limit: 30 });
+            return { key: 'search', label: `Results for “${q}”`, items, hasMore: false };
+        }, 5 * 60 * 1000);
+        res.json({ success: true, data });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// confirm a single clip can still be embedded (used right before playback / deep links)
+app.get('/api/clips/validate/:videoId', async (req, res) => {
+    try {
+        const { videoId } = req.params;
+        if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return res.status(400).json({ success: false, error: 'Invalid video id' });
+        const info = await embeddableInfo(videoId);
+        res.json({ success: true, data: { ok: info.ok, title: info.title, channel: info.channel } });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -975,5 +1250,5 @@ app.listen(PORT, () => {
     console.log(`🗜️  gzip: ${compression ? '✅' : '—'}  🛡️ helmet: ${helmet ? '✅' : '—'}  💾 data dir: ${DATA_DIR}`);
     console.log(`🎬 Embed sources: ${EMBED_SOURCES.map(s=>s.name).join(', ')}`);
     console.log('');
-    console.log(`🚀 YOUFLEX Backend v3.5 running on port ${PORT}`);
+    console.log(`🚀 YOUFLEX Backend v3.6 running on port ${PORT}`);
 });
