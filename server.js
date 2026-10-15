@@ -951,7 +951,7 @@ app.post('/api/client-error', rateLimit({ windowMs: 60 * 1000, max: 20 }), (req,
 // ============================================================
 app.use('/api', (req, res) => res.status(404).json({ success: false, error: 'Not found' }));
 app.use((req, res, next) => {
-    if (req.method === 'GET' && req.accepts('html') && !path.extname(req.path)) return sendIndex(req, res);
+    if (req.method === 'GET' && req.accepts('html') && !/\.(js|css|map|png|jpe?g|gif|svg|ico|webp|avif|json|txt|xml|woff2?|ttf|otf|mp4|webm|mp3)$/i.test(req.path)) return sendIndex(req, res);
     next();
 });
 
