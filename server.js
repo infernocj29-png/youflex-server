@@ -152,6 +152,13 @@ function tmdbTtl(endpoint) {
     return 15 * 60 * 1000;
 }
 async function tmdbFetch(endpoint, params = {}) {
+    // FIX: clear 503 if the API key was never configured, so the frontend
+    // shows "service unavailable" instead of a cryptic 500 error.
+    if (!TMDB_API_KEY) {
+        const err = new Error('TMDB_API_KEY is not configured on the server');
+        err.status = 503;
+        throw err;
+    }
     const key = endpoint + '?' + JSON.stringify(params);
     const hit = tmdbCache.get(key);
     if (hit && Date.now() - hit.ts < hit.ttl) return hit.data;
@@ -1237,7 +1244,8 @@ if (Sentry && process.env.SENTRY_DSN && Sentry.setupExpressErrorHandler) { try {
 app.use((err, req, res, next) => {
     console.error('Unhandled error:', err.message);
     if (res.headersSent) return next(err);
-    res.status(err.status || 500).json({ success: false, error: 'Server error' });
+    // FIX: pass through err.status so 503 from tmdbFetch reaches the client
+    res.status(err.status || 500).json({ success: false, error: err.message || 'Server error' });
 });
 
 app.listen(PORT, () => {
