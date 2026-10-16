@@ -152,13 +152,6 @@ function tmdbTtl(endpoint) {
     return 15 * 60 * 1000;
 }
 async function tmdbFetch(endpoint, params = {}) {
-    // FIX: clear 503 if the API key was never configured, so the frontend
-    // shows "service unavailable" instead of a cryptic 500 error.
-    if (!TMDB_API_KEY) {
-        const err = new Error('TMDB_API_KEY is not configured on the server');
-        err.status = 503;
-        throw err;
-    }
     const key = endpoint + '?' + JSON.stringify(params);
     const hit = tmdbCache.get(key);
     if (hit && Date.now() - hit.ts < hit.ttl) return hit.data;
@@ -927,12 +920,20 @@ app.get('/api/clips/validate/:videoId', async (req, res) => {
 });
 
 // ============================================================
-// EMBED SOURCES   — vidsrc.me ONLY
-// All other sources removed at the user's request.
+// EMBED SOURCES   — FIXED response shape (label / embedUrl / allSources)
+// Dead hosts (vidsrc.xyz, embed.su) removed.
 // ============================================================
 const EMBED_SOURCES = [
-    { name: 'vidsrc.me', movie: id => `https://vidsrc.me/embed/movie?tmdb=${id}`,
-                          tv: (id,s,e) => `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
+    { name: 'Source 1', movie: id => `https://vidsrc.me/embed/movie?tmdb=${id}`,
+                        tv: (id,s,e) => `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
+    { name: 'Source 2', movie: id => `https://vidsrc.to/embed/movie/${id}`,
+                        tv: (id,s,e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}` },
+    { name: 'Source 3', movie: id => `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1`,
+                        tv: (id,s,e) => `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1&s=${s}&e=${e}` },
+    { name: 'Source 4', movie: id => `https://www.smashystream.xyz/playere.php?tmdb=${id}`,
+                        tv: (id,s,e) => `https://www.smashystream.xyz/playere.php?tmdb=${id}&season=${s}&episode=${e}` },
+    { name: 'Source 5', movie: id => `https://www.2embed.cc/embed/${id}`,
+                        tv: (id,s,e) => `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}` },
 ];
 
 function embedPayload(list) {
@@ -1236,8 +1237,7 @@ if (Sentry && process.env.SENTRY_DSN && Sentry.setupExpressErrorHandler) { try {
 app.use((err, req, res, next) => {
     console.error('Unhandled error:', err.message);
     if (res.headersSent) return next(err);
-    // FIX: pass through err.status so 503 from tmdbFetch reaches the client
-    res.status(err.status || 500).json({ success: false, error: err.message || 'Server error' });
+    res.status(err.status || 500).json({ success: false, error: 'Server error' });
 });
 
 app.listen(PORT, () => {
