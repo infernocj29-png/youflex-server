@@ -125,19 +125,46 @@ app.use('/api', (req, res, next) => {
 // ── Frontend hosting: this server also serves index.html + assets ──
 // Never expose backend source / config through the static handler
 app.use((req, res, next) => {
-    if (/^\/(server\.js|package(-lock)?\.json|\.env.*|\.git.*|bin\/|data\/|node_modules\/)|\.md$/i.test(req.path)) {
+    let p = req.path; try { p = decodeURIComponent(p); } catch (_) {}
+    if (/(^|\/)(server\.js|package(-lock)?\.json|\.env[^/]*|\.gitignore|render\.yaml)$/i.test(p)
+        || /(^|\/)(node_modules|bin|data|\.git)(\/|$)/i.test(p)
+        || /\.md$/i.test(p)) {
         return res.status(404).end();
     }
     next();
 });
-// Where the website files live. Auto-detected (first folder that contains index.html),
-// or force it with the STATIC_DIR environment variable.
-const STATIC_ROOT = [process.env.STATIC_DIR, __dirname, path.join(__dirname, 'public'), path.join(__dirname, 'dist'), path.join(__dirname, 'frontend')]
-    .filter(Boolean)
-    .find(d => { try { return fs.existsSync(path.join(d, 'index.html')); } catch (_) { return false; } }) || null;
-console.log(STATIC_ROOT ? `🌐 Serving website from: ${STATIC_ROOT}` : '⚠️  index.html not found — website will NOT be served (API only). Put index.html next to server.js or set STATIC_DIR.');
+// Where the website files live. Auto-detected, or force it with the STATIC_DIR environment variable.
+const hasIndex = d => { try { return fs.existsSync(path.join(d, 'index.html')); } catch (_) { return false; } };
+function scanForIndex(dir, depth) {
+    if (hasIndex(dir)) return dir;
+    if (depth <= 0) return null;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return null; }
+    for (const e of entries) {
+        if (!e.isDirectory() || e.name.startsWith('.') || ['node_modules', 'data', 'bin'].includes(e.name)) continue;
+        const hit = scanForIndex(path.join(dir, e.name), depth - 1);
+        if (hit) return hit;
+    }
+    return null;
+}
+function findStaticRoot() {
+    if (process.env.STATIC_DIR && hasIndex(path.resolve(process.env.STATIC_DIR))) return path.resolve(process.env.STATIC_DIR);
+    for (const [dir, depth] of [[__dirname, 2], [process.cwd(), 2], [path.resolve(__dirname, '..'), 1]]) {
+        const hit = scanForIndex(dir, depth); if (hit) return hit;
+    }
+    return null;
+}
+const STATIC_ROOT = findStaticRoot();
+if (STATIC_ROOT) console.log(`🌐 Serving website from: ${STATIC_ROOT}`);
+else {
+    const ls = d => { try { return fs.readdirSync(d).slice(0, 40).join(', '); } catch (_) { return '(unreadable)'; } };
+    console.warn('⚠️  index.html NOT FOUND — only the API is running.');
+    console.warn(`   server.js folder : ${__dirname}\n   files there      : ${ls(__dirname)}`);
+    console.warn(`   parent folder    : ${path.resolve(__dirname, '..')}\n   files there      : ${ls(path.resolve(__dirname, '..'))}`);
+    console.warn('   Fix: add index.html (+ the other site files) to the repo next to server.js, or set STATIC_DIR to the folder that contains it.');
+}
 function sendIndex(req, res) {
-    if (!STATIC_ROOT) return res.status(404).type('text').send('YOUFLEX API is running, but index.html was not found next to server.js.');
+    if (!STATIC_ROOT) return res.status(404).type('text').send('YOUFLEX API is running, but the website files (index.html) were not found on this server. Add them to the deployed repo, or open the site at your Netlify address.');
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(STATIC_ROOT, 'index.html'));
 }
