@@ -957,16 +957,9 @@ app.get('/api/clips/validate/:videoId', async (req, res) => {
 // Dead hosts (vidsrc.xyz, embed.su) removed.
 // ============================================================
 const EMBED_SOURCES = [
-    { name: 'Source 1', movie: id => `https://vidsrc.me/embed/movie?tmdb=${id}`,
-                        tv: (id,s,e) => `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
-    { name: 'Source 2', movie: id => `https://vidsrc.to/embed/movie/${id}`,
-                        tv: (id,s,e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}` },
-    { name: 'Source 3', movie: id => `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1`,
-                        tv: (id,s,e) => `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1&s=${s}&e=${e}` },
-    { name: 'Source 4', movie: id => `https://www.smashystream.xyz/playere.php?tmdb=${id}`,
-                        tv: (id,s,e) => `https://www.smashystream.xyz/playere.php?tmdb=${id}&season=${s}&episode=${e}` },
-    { name: 'Source 5', movie: id => `https://www.2embed.cc/embed/${id}`,
-                        tv: (id,s,e) => `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}` },
+    { name: 'VidSrc',
+      movie: id => `https://vidsrc.me/embed/movie?tmdb=${id}`,
+      tv: (id, s, e) => `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
 ];
 
 function embedPayload(list) {
