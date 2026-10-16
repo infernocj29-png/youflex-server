@@ -130,14 +130,20 @@ app.use((req, res, next) => {
     }
     next();
 });
+// Where the website files live. Auto-detected (first folder that contains index.html),
+// or force it with the STATIC_DIR environment variable.
+const STATIC_ROOT = [process.env.STATIC_DIR, __dirname, path.join(__dirname, 'public'), path.join(__dirname, 'dist'), path.join(__dirname, 'frontend')]
+    .filter(Boolean)
+    .find(d => { try { return fs.existsSync(path.join(d, 'index.html')); } catch (_) { return false; } }) || null;
+console.log(STATIC_ROOT ? `🌐 Serving website from: ${STATIC_ROOT}` : '⚠️  index.html not found — website will NOT be served (API only). Put index.html next to server.js or set STATIC_DIR.');
 function sendIndex(req, res) {
-    const f = path.join(__dirname, 'index.html');
-    if (!fs.existsSync(f)) return res.status(404).json({ success: false, error: 'index.html not found next to server.js' });
+    if (!STATIC_ROOT) return res.status(404).type('text').send('YOUFLEX API is running, but index.html was not found next to server.js.');
     res.setHeader('Cache-Control', 'no-cache');
-    res.sendFile(f);
+    res.sendFile(path.join(STATIC_ROOT, 'index.html'));
 }
 app.get('/', sendIndex);
-app.use(express.static(__dirname, {
+app.get('/index.html', sendIndex);
+if (STATIC_ROOT) app.use(express.static(STATIC_ROOT, {
     index: false,
     setHeaders: (res, fp) => { if (fp.endsWith('.html') || fp.endsWith('manifest.json')) res.setHeader('Cache-Control', 'no-cache'); },
 }));
