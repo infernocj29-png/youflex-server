@@ -1057,6 +1057,9 @@ app.post('/api/client-error', rateLimit({ windowMs: 60 * 1000, max: 20 }), (req,
     res.json({ success: true });
 });
 
+// ── Reels feed (endless vertical clips) ──
+require('./reels-feed')({ app, tmdbFetch, buildClips, clipCached, mixedTitles, CLIP_SECTIONS, POP });
+
 // ============================================================
 // FALLBACKS  (unknown /api → JSON 404, other pages → index.html)
 // ============================================================
