@@ -1058,7 +1058,7 @@ app.post('/api/client-error', rateLimit({ windowMs: 60 * 1000, max: 20 }), (req,
 });
 
 // ── Reels feed (endless vertical clips) ──
-require('./reels-feed')({ app, tmdbFetch, buildClips, clipCached, mixedTitles, CLIP_SECTIONS, POP });
+try { require('./reels-feed')({ app, tmdbFetch, buildClips, clipCached, mixedTitles, CLIP_SECTIONS, POP }); } catch (e) { console.warn('⚠️  Reels feed NOT loaded:', e.message, '— reels-feed.js must be in the same folder as server.js (and deployed)'); }
 
 // ── Strictly related titles (player sidebar) ──
 try { require('./related-titles')({ app, tmdbFetch, clipCached }); } catch (e) { console.warn('⚠️  related-titles NOT loaded:', e.message, '— related-titles.js must be in the same folder as server.js (and deployed)'); }
